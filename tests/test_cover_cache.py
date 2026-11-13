@@ -128,3 +128,26 @@ def test_ensure_many_returns_only_successes(tmp_path):
     result = asyncio.run(cache.ensure_many([good, bad]))
 
     assert good in result and bad not in result
+
+
+def test_ensure_many_fetches_repeated_url_once(tmp_path):
+    """两行结果是同一张封面时，并发发起也只该抓一次。
+
+    用每次取块前让出事件循环的响应制造真实交叠：若不去重，两次 ``ensure`` 会同时
+    开始、都看不到对方的落盘结果，于是抓两次、并共用同一个 ``.part`` 临时文件。
+    """
+
+    class _YieldingResponse(FakeResponse):
+        async def iter_chunked(self, size):
+            await asyncio.sleep(0)              # 让出控制权，制造并发交叠
+            async for chunk in super().iter_chunked(size):
+                yield chunk
+
+    url = "https://imge.kugou.com/same.jpg"
+    session = FakeSession([_YieldingResponse([_png()]), _YieldingResponse([_png()])])
+    cache = _cache(tmp_path, session)
+
+    result = asyncio.run(cache.ensure_many([url, url, url]))
+
+    assert result == {url: cache.path_for(url)}
+    assert len(session.calls) == 1

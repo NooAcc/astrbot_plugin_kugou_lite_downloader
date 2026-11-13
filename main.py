@@ -293,7 +293,7 @@ class KugouMusic(Star):
         return path
 
     def _extra_font_candidates(self) -> tuple:
-        """额外的中文字体候选：优先用 AstrBot 数据目录自带的字体。"""
+        """额外的中文字体候选：系统字体全部不可用时才回退到数据目录里的 font.ttf。"""
         return (os.path.join(os.getcwd(), "data", "font.ttf"),)
 
     # ── 凭据 ─────────────────────────────────────────────────────────────

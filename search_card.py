@@ -60,6 +60,8 @@ FONT_CANDIDATES_BOLD: tuple[str, ...] = (
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
 )
+#: 调用方额外提供的候选（如 AstrBot 数据目录下的 ``font.ttf``）：**追加在系统候选之后**，
+#: 只作回退——系统自带字体优先（设计文档 §「字体发现顺序」）。
 
 #: 探测中文字形覆盖用的字符：一个常用汉字，与一个必然缺字的私用区码位。
 _PROBE_HAN = "永"
@@ -111,8 +113,8 @@ def cjk_font_available(extra_candidates: tuple[str, ...] = ()) -> bool:
     if ImageFont is None:
         return False
     return bool(
-        _find_font_path(tuple(extra_candidates) + FONT_CANDIDATES)
-        or _find_font_path(tuple(extra_candidates) + FONT_CANDIDATES_BOLD)
+        _find_font_path(FONT_CANDIDATES + tuple(extra_candidates))
+        or _find_font_path(FONT_CANDIDATES_BOLD + tuple(extra_candidates))
     )
 
 
@@ -120,8 +122,8 @@ class _Fonts:
     """按需加载并缓存字号。"""
 
     def __init__(self, extra: tuple[str, ...]):
-        regular = _find_font_path(tuple(extra) + FONT_CANDIDATES)
-        bold = _find_font_path(tuple(extra) + FONT_CANDIDATES_BOLD) or regular
+        regular = _find_font_path(FONT_CANDIDATES + tuple(extra))
+        bold = _find_font_path(FONT_CANDIDATES_BOLD + tuple(extra)) or regular
         if regular is None and bold is None:
             raise CardRenderError("找不到含中文字形的字体，无法渲染卡片")
         self._regular = regular or bold
@@ -159,8 +161,12 @@ def _ellipsize(draw, text: str, font, max_w: float) -> str:
 
 
 def _wrap(draw, text: str, font, max_w: float, max_lines: int) -> list[str]:
-    """按宽度折行（逐字符，兼容中英文混排），最多 max_lines 行，末行省略。"""
-    if not text:
+    """按宽度折行（逐字符，兼容中英文混排），最多 max_lines 行，末行省略。
+
+    ``max_lines <= 0`` 表示一行都不排，返回空列表（与 ``_ellipsize`` 对 ``max_w <= 0``
+    的处理一致），而不是让后面的「末行加省略号」去索引空列表。
+    """
+    if not text or max_lines <= 0:
         return []
     lines: list[str] = []
     current = ""
@@ -208,7 +214,6 @@ def _rounded(image, radius: int):
 
 
 def _placeholder(size: int):
-    tile = Image.new("RGBA", (size, size), PLACEHOLDER_TOP + (255,))
     top = Image.new("RGBA", (size, size), PLACEHOLDER_TOP + (255,))
     bottom = Image.new("RGBA", (size, size), PLACEHOLDER_BOTTOM + (255,))
     mask = Image.linear_gradient("L").resize((size, size))
@@ -258,8 +263,6 @@ def _render_sync(songs: Sequence[Any], keyword: str, output_dir: str,
     f_dur = fonts.get(13)
     f_idx = fonts.get(12, bold=True)
     f_foot = fonts.get(13)
-
-    measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
     # 高度预算：先算清再开画布
     line_h = 15 + 4

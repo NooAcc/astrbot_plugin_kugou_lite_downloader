@@ -98,6 +98,8 @@ python -m pytest tests -q
 
 测试全部离线运行（mock HTTP 会话与 OneBot API），不访问酷狗网络。未安装 `astrbot` 时，`tests/conftest.py` 会注入最小桩模块。`tests/test_package_import.py` 会模拟 AstrBot 的 `data.plugins.<目录名>.main` 包路径布局，验证跨模块导入不依赖插件目录在 `sys.path` 上。
 
+渲染用例（`tests/test_search_card.py`）要求有含中文字形的字体：系统字体可用就用系统字体，否则由 `tests/cjk_font.py` 现场生成一个只含「永」的最小 TTF（依赖 `fontTools`，见 `requirements-dev.txt`）。这样没有中文字体的机器/CI 上渲染用例照常运行，而不是整批 skip。
+
 > **导入约束**：AstrBot 以包路径加载插件，插件目录本身不在 `sys.path`，因此同级模块之间必须用包内相对导入（`from .file_cache import ...`）；每个模块同时保留顶层绝对导入的回退分支，仅供离线测试以顶层模块方式导入时使用。新增同级模块时请沿用该写法。
 
 代码结构：

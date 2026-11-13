@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from io import BytesIO
 from urllib.parse import urljoin
@@ -85,8 +86,12 @@ class CoverCache:
             return None
 
     async def ensure_many(self, urls) -> dict[str, str]:
-        """并发抓取多个封面，只返回成功项（键为原始 URL）。整批超时即放弃剩余。"""
-        wanted = [u for u in urls if isinstance(u, str) and u]
+        """并发抓取多个封面，只返回成功项（键为原始 URL）。整批超时即放弃剩余。
+
+        同一 URL 只抓一次（用 ``dict.fromkeys`` 去重且保持首次出现的顺序）：搜歌结果里
+        两首歌共用一张封面很常见，重复发起既浪费请求，又会让两次抓取撞在同一个临时文件上。
+        """
+        wanted = list(dict.fromkeys(u for u in urls if isinstance(u, str) and u))
         if not wanted:
             return {}
         semaphore = asyncio.Semaphore(max(1, self.limits.concurrency))
@@ -116,7 +121,9 @@ class CoverCache:
             return None
         try:
             os.makedirs(self._dir, exist_ok=True)
-            tmp = f"{path}.{os.getpid()}.part"
+            # 临时名每次唯一：同一个 URL 被并发抓取时若共用一个 .part，先落盘的那次会把
+            # 文件搬走，后落盘的那次 os.replace 就找不到它了（Windows 上会直接失败）。
+            tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex}.part"
             with open(tmp, "wb") as handle:
                 handle.write(data)
             os.replace(tmp, path)

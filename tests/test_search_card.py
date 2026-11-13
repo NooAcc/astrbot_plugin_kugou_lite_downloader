@@ -5,10 +5,11 @@ import os
 import re
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 import search_card
-from search_card import CardRenderError, render_search_card
+from cjk_font import rendering_font_candidates, write_min_cjk_font
+from search_card import CardRenderError, _wrap, render_search_card
 
 _SONGS = [
     {"songname": "晴天", "singername": "周杰伦", "album": "叶惠美", "duration": 269,
@@ -20,10 +21,10 @@ _SONGS = [
 ]
 
 
-def _render(tmp_path, songs, *, require_font=True, **kw):
-    # 没有中文字体的机器上渲染本就会回退文本，这类测试跳过而不是误报失败
-    if require_font and not search_card.cjk_font_available():
-        pytest.skip("本机没有可用的中文字体")
+def _render(tmp_path, songs, **kw):
+    # 渲染必须有一个含中文字形的字体。本机没有时由 cjk_font 现场生成一个兜底候选，
+    # 而不是把整批渲染用例 skip 掉（skip 会让这些断言在任何无中文字体的机器上静默消失）。
+    kw.setdefault("extra_font_candidates", rendering_font_candidates())
     keyword = kw.pop("keyword", "晴天")
     return asyncio.run(render_search_card(songs, keyword, str(tmp_path), **kw))
 
@@ -37,8 +38,9 @@ def test_renders_one_row_per_song_and_returns_png(tmp_path):
 
 
 def test_empty_songs_raises(tmp_path):
+    # 没有可渲染条目时不该先去找字体：这条与字体无关，任何机器上都应成立
     with pytest.raises(CardRenderError):
-        _render(tmp_path, [])
+        asyncio.run(render_search_card([], "晴天", str(tmp_path)))
 
 
 def test_missing_artist_album_duration_does_not_crash(tmp_path):
@@ -63,7 +65,45 @@ def test_no_cjk_font_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(search_card, "FONT_CANDIDATES", ())
     monkeypatch.setattr(search_card, "FONT_CANDIDATES_BOLD", ())
     with pytest.raises(CardRenderError):
-        _render(tmp_path, _SONGS, require_font=False)
+        # 不注入兜底字体：这里验证的正是「一个中文字体都没有」时的回退
+        asyncio.run(render_search_card(_SONGS, "晴天", str(tmp_path)))
+
+
+def test_render_falls_back_to_extra_font_when_system_fonts_absent(tmp_path, monkeypatch):
+    """系统候选全不可用时，``extra_font_candidates`` 仍应能出图。"""
+    font = str(tmp_path / "fallback.ttf")
+    write_min_cjk_font(font)
+    monkeypatch.setattr(search_card, "FONT_CANDIDATES", ())
+    monkeypatch.setattr(search_card, "FONT_CANDIDATES_BOLD", ())
+
+    path = asyncio.run(render_search_card(_SONGS, "晴天", str(tmp_path),
+                                          extra_font_candidates=(font,)))
+
+    assert os.path.exists(path)
+
+
+def test_system_font_wins_over_extra_fallback(tmp_path, monkeypatch):
+    """设计文档：字体发现顺序是「系统候选 → …」，``font.ttf`` 只作回退。"""
+    system = str(tmp_path / "system.ttf")
+    extra = str(tmp_path / "extra.ttf")
+    write_min_cjk_font(system)
+    write_min_cjk_font(extra)
+    monkeypatch.setattr(search_card, "FONT_CANDIDATES", (system,))
+    monkeypatch.setattr(search_card, "FONT_CANDIDATES_BOLD", ())
+
+    fonts = search_card._Fonts((extra,))
+
+    assert os.path.samefile(fonts.get(15).path, system)
+
+
+def test_wrap_with_non_positive_max_lines_returns_no_lines():
+    """``max_lines<=0`` 是「一行都不排」，应当返回空列表而不是 IndexError。"""
+    draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    font = ImageFont.load_default()
+
+    assert _wrap(draw, "很长的歌名", font, 40, 0) == []
+    assert _wrap(draw, "很长的歌名", font, 40, -1) == []
+    assert _wrap(draw, "", font, 40, 0) == []
 
 
 def test_one_row_per_song_keeps_constant_row_height(tmp_path):
