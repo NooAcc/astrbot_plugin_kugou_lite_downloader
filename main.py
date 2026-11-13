@@ -105,7 +105,6 @@ DOWNLOAD_TIMEOUT_SECONDS = 180.0
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
 MAX_CONCURRENT_DOWNLOADS = 2
 QR_TTL_SECONDS = 300
-WX_LINK_TTL_SECONDS = 110
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_POLL_INTERVAL = 2.0
 
@@ -176,7 +175,6 @@ class KugouMusic(Star):
         super().__init__(context)
         self.config = dict(config or {})
         self._session = None
-        self._tasks: set = set()
         self._closing = False
         self._debug: list = []
         self._poll_interval = DEFAULT_POLL_INTERVAL
@@ -247,7 +245,7 @@ class KugouMusic(Star):
         return True
 
     def _raw_cookie(self) -> str:
-        """插件保存的凭据（扫码/微信）优先于 WebUI 手动填写。"""
+        """插件保存的凭据（扫码登录）优先于 WebUI 手动填写。"""
         saved = self._load_saved_cookie()
         if saved:
             return str(saved.get("cookie") or "")
@@ -410,46 +408,6 @@ class KugouMusic(Star):
     def _save_search_cache(self) -> None:
         self._write_json(self._search_cache_file, self._search_cache)
 
-    # ── 后台任务 ─────────────────────────────────────────────────────────
-
-    def _track(self, task) -> None:
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-
-    async def _send_raw_text(self, event, text: str):
-        """直接调用 OneBot API 发文本，返回 message_id（用于撤回）。"""
-        api = getattr(getattr(event, "bot", None), "api", None)
-        if api is None:
-            return None
-        try:
-            if event.get_group_id():
-                resp = await api.call_action(
-                    "send_group_msg", group_id=int(event.get_group_id()),
-                    message=[{"type": "text", "data": {"text": text}}],
-                )
-            else:
-                resp = await api.call_action(
-                    "send_private_msg", user_id=int(event.get_sender_id()),
-                    message=[{"type": "text", "data": {"text": text}}],
-                )
-        except Exception as exc:
-            logger.debug("[kugou] 直发文本失败：%s", type(exc).__name__)
-            return None
-        if isinstance(resp, dict):
-            return (resp.get("data") or {}).get("message_id")
-        return None
-
-    async def _recall_later(self, event, message_id, delay: float) -> None:
-        await asyncio.sleep(delay)
-        api = getattr(getattr(event, "bot", None), "api", None)
-        if not message_id or api is None:
-            return
-        try:
-            await api.call_action("delete_msg", message_id=message_id)
-            logger.debug("[kugou] 已撤回登录链接消息")
-        except Exception as exc:
-            logger.debug("[kugou] 撤回登录链接失败：%s", type(exc).__name__)
-
     # ── 生命周期 ─────────────────────────────────────────────────────────
 
     async def initialize(self) -> None:
@@ -471,13 +429,6 @@ class KugouMusic(Star):
 
     async def terminate(self) -> None:
         self._closing = True
-        pending = list(self._tasks)
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        self._tasks.clear()
-
         session = self._session
         self._session = None
         if session is not None and hasattr(session, "close"):
@@ -543,56 +494,6 @@ class KugouMusic(Star):
         yield event.plain_result("⏱ 二维码超时（5 分钟未扫码），请重新发送 /酷狗扫码登录")
 
     @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("酷狗微信登录")
-    async def cmd_wx_login(self, event: AstrMessageEvent):
-        """微信授权登录（酷狗概念版安卓小程序渠道）。"""
-        try:
-            async for result in self._wx_login_flow(event):
-                yield result
-        finally:
-            self._stop(event)
-
-    async def _wx_login_flow(self, event: AstrMessageEvent):
-        login = self._make_login(await self._get_session())
-        try:
-            started = await login.wx_start()
-        except LoginError as exc:
-            yield event.plain_result(f"❌ {exc}")
-            return
-
-        link_text = (
-            "📱 请在微信中打开以下链接授权登录酷狗概念版\n\n"
-            f"👉 {started.auth_url}\n\n"
-            "⚠️ 打开后在微信里点「确认登录」即可\n"
-            f"⏰ 此消息 {WX_LINK_TTL_SECONDS} 秒后自动撤回（防止链接被盗用）"
-        )
-        message_id = await self._send_raw_text(event, link_text)
-        if not message_id:
-            yield event.plain_result(link_text)
-        self._track(asyncio.create_task(self._recall_later(event, message_id, WX_LINK_TTL_SECONDS)))
-
-        deadline = time.time() + WX_LINK_TTL_SECONDS
-        code = ""
-        while time.time() < deadline and not self._closing:
-            await asyncio.sleep(self._poll_interval)
-            code = await login.wx_poll_once(started.uuid)
-            if code:
-                break
-
-        if not code:
-            yield event.plain_result(
-                f"⏱ 微信授权超时（{WX_LINK_TTL_SECONDS} 秒内未确认），请重新发送 /酷狗微信登录"
-            )
-            return
-
-        try:
-            result = await login.wx_exchange(code)
-        except LoginError as exc:
-            yield event.plain_result(f"⚠️ {exc}")
-            return
-        yield event.plain_result(self._persist_login(result))
-
-    @filter.permission_type(PermissionType.ADMIN)
     @filter.command("酷狗退出登录")
     async def cmd_logout(self, event: AstrMessageEvent):
         """清除插件管理的登录凭据。"""
@@ -628,7 +529,6 @@ class KugouMusic(Star):
             yield event.plain_result(
                 "❌ 未登录\n"
                 "发送 /酷狗扫码登录 用手机扫码登录\n"
-                "发送 /酷狗微信登录 用微信授权登录\n"
                 "或在 WebUI 填写 kugou_cookie"
             )
             return

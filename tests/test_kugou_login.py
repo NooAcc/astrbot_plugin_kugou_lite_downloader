@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import json
 
 import pytest
 from fake_session import FakeSession, json_response
@@ -11,8 +10,6 @@ from kugou_login import (
     QR_TRANSIENT,
     LiteLogin,
     LoginError,
-    aes_decrypt,
-    aes_encrypt,
     build_cookie,
     cookie_source_label,
     extract_cookie_field,
@@ -22,12 +19,9 @@ from kugou_login import (
 _DEVICE = Device(dfid="d" * 8, mid="m" * 8, uuid="u" * 8)
 
 
-def _login(responses, temp_key=None):
+def _login(responses):
     session = FakeSession(responses)
-    kwargs = {}
-    if temp_key is not None:
-        kwargs["temp_key_factory"] = lambda: temp_key
-    return LiteLogin(session, _DEVICE, ua="ua", timeout=5.0, **kwargs), session
+    return LiteLogin(session, _DEVICE, ua="ua", timeout=5.0), session
 
 
 # ── 扫码登录 ─────────────────────────────────────────────────────────────
@@ -111,128 +105,6 @@ def test_qr_credentials_raises_without_leaking_secrets():
     assert "token" in str(err.value)
 
 
-# ── 微信登录 ─────────────────────────────────────────────────────────────
-
-
-def test_wx_start_chains_access_token_ticket_and_qrconnect():
-    login, session = _login([
-        json_response({"access_token": "AT"}),
-        json_response({"errcode": 0, "ticket": "TICKET"}),
-        json_response({"errcode": 0, "uuid": "WXUUID"}),
-    ])
-
-    started = asyncio.run(login.wx_start())
-
-    assert "cgi-bin/token" in session.calls[0]["url"]
-    assert session.calls[0]["kw"]["params"]["appid"] == "wx72b795aca60ad321"   # 概念版微信 appid
-    assert "ticket/getticket" in session.calls[1]["url"]
-    assert "qrconnect" in session.calls[2]["url"]
-    assert session.calls[2]["kw"]["params"]["appid"] == "wx72b795aca60ad321"
-    assert len(session.calls[2]["kw"]["params"]["signature"]) == 40    # sha1
-    assert started.uuid == "WXUUID"
-    assert started.auth_url == "https://open.weixin.qq.com/connect/confirm?uuid=WXUUID"
-
-
-def test_wx_start_raises_when_access_token_missing():
-    login, _ = _login([json_response({"errcode": 40013, "errmsg": "bad appid"})])
-    with pytest.raises(LoginError) as err:
-        asyncio.run(login.wx_start())
-    assert "微信" in str(err.value)
-
-
-def test_wx_start_raises_when_qrconnect_rejected():
-    login, _ = _login([
-        json_response({"access_token": "AT"}),
-        json_response({"errcode": 0, "ticket": "T"}),
-        json_response({"errcode": 40029}),
-    ])
-    with pytest.raises(LoginError):
-        asyncio.run(login.wx_start())
-
-
-def test_wx_poll_once_returns_code_or_empty():
-    login, _ = _login([
-        json_response({"wx_code": ""}),
-        json_response({"wx_code": "CODE1"}),
-        json_response({}, status=500),
-    ])
-    assert asyncio.run(login.wx_poll_once("U")) == ""
-    assert asyncio.run(login.wx_poll_once("U")) == "CODE1"
-    assert asyncio.run(login.wx_poll_once("U")) == ""
-
-
-def test_wx_exchange_decrypts_secu_params_and_hides_access_token():
-    temp_key = "0123456789abcdef"
-    aes_key = hashlib.md5(temp_key.encode()).hexdigest()[:32]
-    secu = aes_encrypt(json.dumps({"token": "TK", "userid": 42}), aes_key, aes_key[-16:])
-    login, session = _login([
-        json_response({"access_token": "AT-SECRET", "openid": "OPENID1"}),
-        json_response({"status": 1, "data": {"secu_params": secu, "userid": 42}}),
-    ], temp_key=temp_key)
-
-    result = asyncio.run(login.wx_exchange("CODE1"))
-
-    assert result.token == "TK" and result.userid == "42" and result.source == "wx_wechat"
-    oauth_call = session.calls[0]
-    assert oauth_call["url"] == "https://api.weixin.qq.com/sns/oauth2/access_token"
-    assert oauth_call["kw"]["params"]["appid"] == "wx72b795aca60ad321"
-    login_call = session.calls[1]
-    assert login_call["url"] == "https://gateway.kugou.com/v6/login_by_openplat"
-    assert login_call["kw"]["headers"]["x-router"] == "login.user.kugou.com"
-    assert login_call["kw"]["headers"]["Content-Type"] == "application/json"
-
-    # 上游 login_openplat.js：请求体只有这 10 个字段，设备标识走 query
-    body_raw = login_call["kw"]["data"]
-    assert isinstance(body_raw, str)                    # JSON 字符串：签名与发送的是同一份
-    body = json.loads(body_raw)
-    assert set(body) == {
-        "dev", "force_login", "partnerid", "clienttime_ms",
-        "t1", "t2", "t3", "openid", "params", "pk",
-    }
-    assert body["openid"] == "OPENID1"
-    assert not ({"dfid", "mid", "uuid", "appid", "clientver", "clienttime", "signature"} & set(body))
-
-    query = login_call["kw"]["params"]
-    assert query["appid"] == 3116 and query["clientver"] == 11440 and query["srcappid"] == 2919
-    assert query["dfid"] == _DEVICE.dfid and query["mid"] == _DEVICE.mid and query["uuid"] == _DEVICE.uuid
-    assert login_call["kw"]["headers"]["dfid"] == _DEVICE.dfid
-    assert login_call["kw"]["headers"]["mid"] == _DEVICE.mid
-    unsigned = {k: v for k, v in query.items() if k != "signature"}
-    assert query["signature"] == _android_sign(unsigned, body_raw)   # 签名覆盖 query + body
-
-    assert "AT-SECRET" not in body_raw                  # access_token 必须加过密
-    assert hashlib.md5(b"AT-SECRET").hexdigest() not in body_raw
-
-
-def test_wx_exchange_falls_back_to_plain_token_when_secu_undecryptable():
-    login, _ = _login([
-        json_response({"access_token": "AT", "openid": "OID"}),
-        json_response({"status": 1, "data": {"secu_params": "zzzz", "token": "RAW", "userid": 7}}),
-    ], temp_key="0123456789abcdef")
-
-    result = asyncio.run(login.wx_exchange("CODE"))
-
-    assert result.token == "RAW" and result.userid == "7"
-
-
-def test_wx_exchange_raises_when_kugou_rejects_login():
-    login, _ = _login([
-        json_response({"access_token": "AT", "openid": "OID"}),
-        json_response({"status": 0, "error": "风控"}),
-    ], temp_key="0123456789abcdef")
-
-    with pytest.raises(LoginError) as err:
-        asyncio.run(login.wx_exchange("CODE"))
-    assert "AT" not in str(err.value)
-
-
-def test_wx_exchange_raises_when_wechat_oauth_fails():
-    login, _ = _login([json_response({"errcode": 40029, "errmsg": "invalid code"})],
-                      temp_key="0123456789abcdef")
-    with pytest.raises(LoginError):
-        asyncio.run(login.wx_exchange("BAD"))
-
-
 # ── Cookie 处理 ──────────────────────────────────────────────────────────
 
 
@@ -272,7 +144,6 @@ def test_extract_cookie_field():
 
 def test_cookie_source_label_distinguishes_sources():
     assert cookie_source_label({"source": "inline_qr"}, "") == "扫码登录"
-    assert cookie_source_label({"source": "wx_wechat"}, "") == "微信登录"
     assert cookie_source_label(None, "token=t") == "WebUI 手动配置"
     assert cookie_source_label(None, "") == "无"
 
@@ -286,10 +157,3 @@ def _web_sign(params):
     salt = "NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt"
     joined = "".join(f"{key}={params[key]}" for key in sorted(params))
     return hashlib.md5(f"{salt}{joined}{salt}".encode()).hexdigest()
-
-
-def _android_sign(params, body=""):
-    """按上游 android 渠道算法独立实现（query 排序串 + body 一起签名）。"""
-    salt = "LnT6xpN3khm36zse0QzvmgTZ3waWdRSA"
-    joined = "".join(f"{key}={params[key]}" for key in sorted(params))
-    return hashlib.md5(f"{salt}{joined}{body}{salt}".encode()).hexdigest()

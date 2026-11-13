@@ -2,7 +2,7 @@
   "kugou_cookie": {
     "description": "酷狗概念版登录 Cookie",
     "type": "text",
-    "hint": "可留空：用 /酷狗扫码登录 或 /酷狗微信登录 获取，插件会自动保存。也可手动填写含 token、userid 的 cookie 字符串（不要填标准版账号的 Cookie）。",
+    "hint": "可留空：用 /酷狗扫码登录 获取，插件会自动保存。也可手动填写含 token、userid 的 cookie 字符串（不要填标准版账号的 Cookie）。",
     "obvious_hint": true,
     "default": ""
   },
@@ -40,7 +40,7 @@
   "timeout": {
     "description": "接口请求超时（秒）",
     "type": "int",
-    "hint": "酷狗/微信接口的请求超时。音频下载使用固定的 180 秒上限，不受此项影响。",
+    "hint": "酷狗接口的请求超时。音频下载使用固定的 180 秒上限，不受此项影响。",
     "default": 15
   },
   "debug": {

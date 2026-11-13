@@ -82,9 +82,10 @@ def test_ladder_builds_once_and_reuses_cache_manager(plugin_factory, shared_dir)
 
 def test_plugin_registers_login_commands(plugin_factory):
     plugin_factory()
-    assert {"酷狗扫码登录", "酷狗微信登录", "酷狗退出登录", "酷狗登录状态"} <= set(
+    assert {"酷狗扫码登录", "酷狗退出登录", "酷狗登录状态"} <= set(
         main.filter.registered
     )
+    assert "酷狗微信登录" not in main.filter.registered
 
 
 def test_plugin_uses_plugin_data_dir_for_state(plugin_factory):
@@ -154,10 +155,10 @@ def test_logout_clears_only_plugin_managed_cookie(plugin_factory):
 
 def test_cookie_round_trip_records_source(plugin_factory):
     plugin = plugin_factory()
-    assert plugin._save_cookie(_LITE_COOKIE, source="wx_wechat") is True
+    assert plugin._save_cookie(_LITE_COOKIE, source="inline_qr") is True
     saved = plugin._load_saved_cookie()
     assert saved["cookie"] == _LITE_COOKIE
-    assert saved["source"] == "wx_wechat"
+    assert saved["source"] == "inline_qr"
     assert "saved_at" in saved
 
 
@@ -191,7 +192,7 @@ def test_persist_login_reports_success(plugin_factory):
     assert plugin._load_saved_cookie()["cookie"] == "token=t; userid=1; a_id=3116"
 
 
-# ── 扫码 / 微信登录指令 ─────────────────────────────────────────────────
+# ── 扫码登录指令 ─────────────────────────────────────────────────────────
 
 
 def test_qr_login_polls_and_saves_credentials(plugin_factory):
@@ -252,36 +253,6 @@ def test_qr_login_aborts_when_shutting_down(plugin_factory):
     assert "成功" not in event.text
 
 
-def test_wx_login_reports_link_and_exchanges_code(plugin_factory):
-    plugin = plugin_factory()
-    plugin._poll_interval = 0
-    plugin._session = FakeSession([
-        json_response({"access_token": "AT"}),                       # access_token
-        json_response({"errcode": 0, "ticket": "T"}),                # ticket
-        json_response({"errcode": 0, "uuid": "WXU"}),                # qrconnect
-        json_response({"wx_code": "CODE"}),                          # 轮询
-        json_response({"access_token": "AT2", "openid": "OID"}),     # wx oauth
-        json_response({"status": 1, "data": {"token": "WXT", "userid": 88}}),
-    ])
-
-    event = FakeEvent()
-    collect(plugin.cmd_wx_login(event))
-
-    assert "uuid=WXU" in event.text
-    assert "88" in event.text
-    assert plugin._load_saved_cookie()["cookie"] == "token=WXT; userid=88; a_id=3116"
-
-
-def test_wx_login_reports_failure_to_start(plugin_factory):
-    plugin = plugin_factory()
-    plugin._session = FakeSession([json_response({"errcode": 40013})])
-
-    event = FakeEvent()
-    collect(plugin.cmd_wx_login(event))
-
-    assert "❌" in event.text
-
-
 # ── 调试输出与生命周期 ───────────────────────────────────────────────────
 
 
@@ -307,9 +278,9 @@ def test_debug_output_is_empty_when_disabled(plugin_factory):
     assert plugin._flush_debug() == ""
 
 
-def test_terminate_cancels_tasks_and_closes_session(plugin_factory):
+def test_terminate_closes_session_and_marks_closing(plugin_factory):
     plugin = plugin_factory()
-    state = {"closed": False, "cancelled": False}
+    state = {"closed": False}
 
     class _Session:
         closed = False
@@ -320,23 +291,10 @@ def test_terminate_cancels_tasks_and_closes_session(plugin_factory):
 
     plugin._session = _Session()
 
-    async def hang():
-        try:
-            await asyncio.sleep(30)
-        except asyncio.CancelledError:
-            state["cancelled"] = True
-            raise
-
-    async def scenario():
-        plugin._track(asyncio.create_task(hang()))
-        await asyncio.sleep(0)
-        await plugin.terminate()
-
-    asyncio.run(scenario())
+    asyncio.run(plugin.terminate())
 
     assert state["closed"] is True
-    assert state["cancelled"] is True
-    assert plugin._tasks == set()
+    assert plugin._session is None
     assert plugin._closing is True
 
 
@@ -792,16 +750,6 @@ def test_login_commands_stop_event_propagation(plugin_factory):
     logout_event = FakeEvent()
     collect(plugin.cmd_logout(logout_event))
     assert logout_event.stopped is True
-
-
-def test_wx_login_stops_event_propagation_on_failure(plugin_factory):
-    plugin = plugin_factory()
-    plugin._session = FakeSession([json_response({"errcode": 40013})])
-    event = FakeEvent()
-
-    collect(plugin.cmd_wx_login(event))
-
-    assert event.stopped is True
 
 
 def test_prune_search_cache_survives_non_dict_entries(plugin_factory):
