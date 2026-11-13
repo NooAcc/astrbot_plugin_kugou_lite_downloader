@@ -757,14 +757,24 @@ def test_build_upload_request_rejects_bad_target_id():
         build_upload_request(False, "", "p", "n")
 
 
+def test_check_upload_result_accepts_real_aiocqhttp_data_payload():
+    """aiocqhttp 只把信封里的 data 返回给调用方，成功时没有 status/retcode。
+
+    upload_*_file 在 OneBot v11 里没有响应数据，所以 data 常见是 {} 或 None；
+    部分实现（如 NapCat）会塞 file_id 等字段。这些都表示 OneBot 已受理上传，
+    失败会直接抛 ActionFailed，不会走到这里。
+    """
+    assert check_upload_result({})[0] is True
+    assert check_upload_result(None)[0] is True
+    assert check_upload_result({"file_id": "abc", "file_name": "a.flac"})[0] is True
+
+
 def test_check_upload_result_variants():
+    # 少数实现/旧桩返回完整信封时，仍按 status/retcode 判定
     assert check_upload_result({"status": "ok", "retcode": 0})[0] is True
     assert check_upload_result({"status": "failed", "retcode": 0})[0] is False
     assert check_upload_result({"retcode": 1200, "msg": "bad"})[0] is False
     assert check_upload_result({"status": "failed", "wording": "群文件不可用"})[1] != ""
-    assert check_upload_result(None)[0] is False
-    assert check_upload_result({})[0] is False
-    assert check_upload_result("unexpected")[0] is False
 
 
 def test_check_upload_result_accepts_string_zero_retcode():
@@ -1197,6 +1207,48 @@ def test_upload_retcode_failure_is_reported(plugin_factory, monkeypatch, tmp_pat
 
     assert "失败" in event.text
     assert "1200" in event.text or "file too large" in event.text
+
+
+def test_upload_reports_success_for_unwrapped_onebot_data(plugin_factory, monkeypatch, tmp_path):
+    """真实 aiocqhttp 只回 data 字段：这就是上传成功，不能报失败。"""
+    plugin = plugin_factory()
+    _install_ladder(plugin, monkeypatch, _StubLadder(outcome=_outcome(str(tmp_path / "a.flac"))))
+
+    bot = FakeBot(responses=[{"file_id": "abc", "file_name": "a.flac"}])
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=bot)
+    _seed_cache(plugin, event)
+
+    collect(plugin.cmd_search(event))
+
+    assert "失败" not in event.text
+    assert "已发送文件" in event.text
+    assert event.stopped is True
+
+
+class _ActionFailed(Exception):
+    """aiocqhttp ActionFailed 的最小替身：真实失败时携带完整信封。"""
+
+    def __init__(self, result):
+        super().__init__(f"<ActionFailed {result}>")
+        self.result = result
+
+
+def test_upload_action_failed_surfaces_onebot_reason(plugin_factory, monkeypatch, tmp_path):
+    """OneBot 收到请求但拒绝（ActionFailed）时，报它的原因而不是「接口不支持」。"""
+    plugin = plugin_factory()
+    _install_ladder(plugin, monkeypatch, _StubLadder(outcome=_outcome(str(tmp_path / "a.flac"))))
+
+    bot = FakeBot(error=_ActionFailed(
+        {"status": "failed", "retcode": 1200, "wording": "群文件空间已满"}
+    ))
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=bot)
+    _seed_cache(plugin, event)
+
+    collect(plugin.cmd_search(event))
+
+    assert "失败" in event.text
+    assert "群文件空间已满" in event.text
+    assert "1200" in event.text
 
 
 def test_download_releases_hold_even_on_upload_failure(plugin_factory, monkeypatch, tmp_path):

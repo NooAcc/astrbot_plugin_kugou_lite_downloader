@@ -13,7 +13,7 @@ desc: |
   - 必须配置共享缓存目录（AstrBot 与 OneBot 端同一路径）；OneBot 实现需支持
     `upload_group_file` / `upload_private_file` 扩展接口
   - 需要 OneBot v11（aiocqhttp）平台
-version: 2.3.1
+version: 2.3.2
 author: xiaoyunsha
 repo: https://github.com/NooAcc/astrbot_plugin_kugou_music
 astrbot_version: ">=4.17.0"

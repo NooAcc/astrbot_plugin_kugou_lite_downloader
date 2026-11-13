@@ -227,15 +227,19 @@ def build_qr_message(image_b64: str, timeout_seconds: int, scan_url: str = "") -
 def check_upload_result(response) -> tuple[bool, str]:
     """判定 OneBot 上传结果。
 
-    只有明确表示成功才算成功：非 dict、空结果、缺少 status/retcode、
-    `status == "failed"`、非零 `retcode` 一律按失败处理，绝不报告发送成功。
+    aiocqhttp 的 `call_action` 走 `_handle_api_result`：只把信封里的 `data`
+    字段返回给调用方，`status == "failed"` 会直接抛 `ActionFailed`。所以能带着
+    返回值走到这里、且没有异常，就说明 OneBot 端已受理本次上传——`upload_*_file`
+    在 OneBot v11 里没有响应数据，`data` 常见是 `null` 或 `{}`，部分实现会附带
+    `file_id` 等字段。
+
+    少数实现/旧测试桩会返回完整信封，此时仍按 `status` / `retcode` 判定；
+    信封里 `status == "failed"` 或非零 `retcode` 一律按失败处理。
     """
     if not isinstance(response, dict):
-        return False, "OneBot 没有返回可识别的结果"
-    if not response:
-        return False, "OneBot 返回了空结果"
+        return True, ""
     if "status" not in response and "retcode" not in response:
-        return False, "OneBot 返回结果缺少 status/retcode 字段"
+        return True, ""
     if response.get("status") == "failed":
         detail = response.get("wording") or response.get("msg") or "未知原因"
         return False, f"OneBot 返回失败：{detail}"
@@ -898,14 +902,28 @@ class KugouMusic(Star):
         try:
             response = await api.call_action(action, **params)
         except Exception as exc:
-            logger.error("[kugou] 文件上传异常：%s", type(exc).__name__)
-            return (
-                f"[酷狗] 文件上传失败：{type(exc).__name__}\n"
-                f"请确认 OneBot 实现支持 {action} / upload_private_file 扩展接口，"
-                "并确认共享缓存目录在 OneBot 端可读"
-            )
+            # aiocqhttp 里「OneBot 收到请求但拒绝」表现为 ActionFailed，其 result
+            # 就是完整信封；接口不存在/连接失败等则没有它，两种情况要分开提示。
+            envelope = getattr(exc, "result", None)
+            envelope = envelope if isinstance(envelope, dict) else {}
+            logger.error("[kugou] 文件上传异常：%s: %s", type(exc).__name__, exc)
+            reason = (envelope.get("wording") or envelope.get("msg")
+                      or envelope.get("message") or type(exc).__name__)
+            if envelope.get("retcode") is not None:
+                reason = f"retcode={envelope['retcode']} {reason}".strip()
+            if envelope:
+                hint = "请确认共享缓存目录在 OneBot 端可读、群文件空间未满"
+            else:
+                hint = (
+                    f"请确认 OneBot 实现支持 {action} / upload_private_file 扩展接口，"
+                    "并确认共享缓存目录在 OneBot 端可读"
+                )
+            return f"[酷狗] 文件上传失败：{reason}\n{hint}"
 
         ok, reason = check_upload_result(response)
+        # 只记字段名：data 里可能带 file_id/短链，且大对象不该进调试输出
+        shape = list(response) if isinstance(response, dict) else type(response).__name__
+        self._add_debug("upload_result", ok=ok, reason=reason or None, response=shape)
         if not ok:
             logger.warning("[kugou] 文件上传未成功：%s", reason)
             return f"[酷狗] 文件上传失败：{reason}"

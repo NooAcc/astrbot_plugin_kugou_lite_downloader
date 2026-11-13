@@ -114,6 +114,7 @@
 - **设备注册 dfid 未实现**：酷狗文档提示取播放地址前可能需要 `/register/dev` 注册设备。本插件使用 Cookie 中的 `dfid/mid`，缺失时生成并持久化本机随机标识；实测（见上）未注册设备也能取得 Hi-Res。若服务端要求「本次请求需要验证」，会明确报错（可重新扫码登录）。
 - **CDN 域名允许列表**：仅接受 `*.kugou.com`、`*.kglink.com`、`*.kgidc.cn`。若酷狗新 CDN 使用其他域名，下载会以「主机不在允许列表」明确报错，需要扩充 `file_cache.ALLOWED_HOST_SUFFIXES`。
 - **NapCat / CQHTTP 等实现差异**：文件上传 API 的可用性与文件大小限制取决于具体实现，以真实端到端验证为准。
+- **OneBot 上传结果的判定契约**（2026-11-14 修正）：aiocqhttp 的 `call_action` 走 `_handle_api_result`，只把信封里的 `data` 返回给调用方，`status == "failed"` 会直接抛 `ActionFailed`。`upload_*_file` 在 OneBot v11 里没有响应数据，`data` 常见是 `null` / `{}`（部分实现会附 `file_id` 等字段），所以「拿到返回值且无异常」就等于 OneBot 端已受理。旧实现按完整信封判定，会把成功也报成「文件上传失败：OneBot 返回结果缺少 status/retcode 字段」；现在只有信封明确失败才报错，并把 OneBot 自己的原因（如 `retcode=1200 群文件空间已满`）显示给用户。打开 `debug` 可在输出里看到 `upload_result` 记录的响应字段名，便于核对实现差异。
 
 ## 开发与测试
 
