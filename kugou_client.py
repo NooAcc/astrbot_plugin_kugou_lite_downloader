@@ -17,8 +17,16 @@ import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from file_cache import DownloadError, SharedDirError, UnsafeUrlError, build_filename
-from quality import TIER_PROTOCOL_QUALITY, TIER_RELATE_LEVELS, TIERS, label, meets
+try:
+    from .file_cache import (
+        DownloadError, SharedDirError, UnsafeUrlError, build_filename,
+    )
+    from .quality import TIER_PROTOCOL_QUALITY, TIER_RELATE_LEVELS, TIERS, label, meets
+except ImportError:  # 以顶层模块方式导入（离线测试）
+    from file_cache import (
+        DownloadError, SharedDirError, UnsafeUrlError, build_filename,
+    )
+    from quality import TIER_PROTOCOL_QUALITY, TIER_RELATE_LEVELS, TIERS, label, meets
 
 # ── Lite 常量 ────────────────────────────────────────────────────────────
 

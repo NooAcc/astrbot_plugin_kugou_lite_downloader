@@ -26,16 +26,28 @@ from typing import Callable
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
-from kugou_client import (
-    APPID,
-    CLIENTVER,
-    KG_STATIC_HEADERS,
-    SRCAPPID,
-    Device,
-    android_sign,
-    compact_json,
-    web_sign,
-)
+try:
+    from .kugou_client import (
+        APPID,
+        CLIENTVER,
+        KG_STATIC_HEADERS,
+        SRCAPPID,
+        Device,
+        android_sign,
+        compact_json,
+        web_sign,
+    )
+except ImportError:  # 以顶层模块方式导入（离线测试）
+    from kugou_client import (
+        APPID,
+        CLIENTVER,
+        KG_STATIC_HEADERS,
+        SRCAPPID,
+        Device,
+        android_sign,
+        compact_json,
+        web_sign,
+    )
 
 logger = logging.getLogger(__name__)
 

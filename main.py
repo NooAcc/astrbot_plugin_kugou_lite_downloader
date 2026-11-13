@@ -23,40 +23,78 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import PermissionType
 from astrbot.api.star import Context, Star
 
-from file_cache import (
-    AudioFetcher,
-    CacheManager,
-    DownloadError,
-    Downloader,
-    Limits,
-    SharedDirError,
-    UnsafeUrlError,
-)
-from kugou_client import (
-    KG_UA,
-    AllQualitiesFailed,
-    Credentials,
-    Device,
-    DownloadLadder,
-    KugouApiError,
-    KugouClient,
-    redact_secrets,
-)
-from kugou_login import (
-    QR_CONFIRMED,
-    QR_EXPIRED,
-    QR_SCANNED,
-    QR_TRANSIENT,
-    QR_WAITING,
-    LiteLogin,
-    LoginError,
-    LoginResult,
-    build_cookie,
-    cookie_source_label,
-    extract_cookie_field,
-    validate_cookie,
-)
-from quality import ConfigError, parse_quality_priority
+# 同时兼容两种导入方式：AstrBot 以包路径 data.plugins.<dir>.main 加载时走
+# 相对导入；离线测试/工具以顶层模块 main 加载时回退到绝对导入。
+try:
+    from .file_cache import (
+        AudioFetcher,
+        CacheManager,
+        DownloadError,
+        Downloader,
+        Limits,
+        SharedDirError,
+        UnsafeUrlError,
+    )
+    from .kugou_client import (
+        KG_UA,
+        AllQualitiesFailed,
+        Credentials,
+        Device,
+        DownloadLadder,
+        KugouApiError,
+        KugouClient,
+        redact_secrets,
+    )
+    from .kugou_login import (
+        QR_CONFIRMED,
+        QR_EXPIRED,
+        QR_SCANNED,
+        QR_TRANSIENT,
+        QR_WAITING,
+        LiteLogin,
+        LoginError,
+        LoginResult,
+        build_cookie,
+        cookie_source_label,
+        extract_cookie_field,
+        validate_cookie,
+    )
+    from .quality import ConfigError, parse_quality_priority
+except ImportError:  # 以顶层模块方式导入（离线测试）
+    from file_cache import (
+        AudioFetcher,
+        CacheManager,
+        DownloadError,
+        Downloader,
+        Limits,
+        SharedDirError,
+        UnsafeUrlError,
+    )
+    from kugou_client import (
+        KG_UA,
+        AllQualitiesFailed,
+        Credentials,
+        Device,
+        DownloadLadder,
+        KugouApiError,
+        KugouClient,
+        redact_secrets,
+    )
+    from kugou_login import (
+        QR_CONFIRMED,
+        QR_EXPIRED,
+        QR_SCANNED,
+        QR_TRANSIENT,
+        QR_WAITING,
+        LiteLogin,
+        LoginError,
+        LoginResult,
+        build_cookie,
+        cookie_source_label,
+        extract_cookie_field,
+        validate_cookie,
+    )
+    from quality import ConfigError, parse_quality_priority
 
 PLUGIN_DIRNAME = "astrbot_plugin_kugou_music"
 

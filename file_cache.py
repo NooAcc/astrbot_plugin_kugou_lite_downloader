@@ -20,8 +20,12 @@ import uuid
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit
 
-from audio_probe import extension_of, probe, refine_bitrate, tier_of
-from quality import label
+try:
+    from .audio_probe import extension_of, probe, refine_bitrate, tier_of
+    from .quality import label
+except ImportError:  # 以顶层模块方式导入（离线测试）
+    from audio_probe import extension_of, probe, refine_bitrate, tier_of
+    from quality import label
 
 # ── 常量 ─────────────────────────────────────────────────────────────────
 
