@@ -48,6 +48,13 @@
       "step": 1
     }
   },
+  "font_auto_download": {
+    "description": "自动补全中文字体",
+    "type": "bool",
+    "default": true,
+    "hint": "搜歌卡片用插件自带的 HarmonyOS Sans SC 渲染。若随插件分发的字体文件缺失或损坏，开启时允许从固定镜像（gitee.com）取回并按内容校验后落盘，避免卡片悄悄换成观感不同的系统字体。内网/离线环境可关闭：此时卡片退回系统中文字体，不影响搜歌与下载。",
+    "obvious_hint": true
+  },
   "timeout": {
     "description": "接口请求超时（秒）",
     "type": "int",

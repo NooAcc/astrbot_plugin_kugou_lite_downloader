@@ -64,6 +64,14 @@ try:
         validate_cookie,
     )
     from .cover_cache import CoverCache
+    from .font_store import (
+        FONT_SOURCES,
+        FONT_SOURCES_BY_NAME,
+        FontStore,
+        bundled_fonts,
+        candidates_by_weight,
+        verify_font,
+    )
     from .quality import ConfigError, parse_quality_priority
     from .search_card import CardRenderError, render_search_card
 except ImportError:  # 以顶层模块方式导入（离线测试）
@@ -103,6 +111,14 @@ except ImportError:  # 以顶层模块方式导入（离线测试）
         validate_cookie,
     )
     from cover_cache import CoverCache
+    from font_store import (
+        FONT_SOURCES,
+        FONT_SOURCES_BY_NAME,
+        FontStore,
+        bundled_fonts,
+        candidates_by_weight,
+        verify_font,
+    )
     from quality import ConfigError, parse_quality_priority
     from search_card import CardRenderError, render_search_card
 
@@ -118,6 +134,7 @@ MAX_CONCURRENT_DOWNLOADS = 2
 QR_LOGIN_TIMEOUT_SECONDS = 100       # 二维码消息发出后的硬截止：保证可撤回
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_POLL_INTERVAL = 2.0
+FONT_WAIT_SECONDS = 20.0             # 首次渲染愿为「补全自带字体」等待的上限
 
 
 def plugin_data_dir() -> str:
@@ -250,6 +267,11 @@ class KugouMusic(Star):
         self._device: Device | None = None
         self._last_cleanup = 0.0
 
+        # 卡片字体候选（自带 → 已补全），首次解析后缓存；补全只做一次
+        self._fonts: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+        self._font_lock = asyncio.Lock()
+        self._font_task: asyncio.Task | None = None
+
     # ── 通用配置读取 ─────────────────────────────────────────────────────
 
     def _ua(self) -> str:
@@ -293,8 +315,78 @@ class KugouMusic(Star):
         return path
 
     def _extra_font_candidates(self) -> tuple:
-        """额外的中文字体候选：系统字体全部不可用时才回退到数据目录里的 font.ttf。"""
+        """额外的中文字体候选：自带/补全/系统字体全不可用时才回退到数据目录 font.ttf。"""
         return (os.path.join(os.getcwd(), "data", "font.ttf"),)
+
+    def _fonts_dir(self) -> str:
+        """补全字体的落盘目录（插件数据目录内，与封面、卡片图无关）。"""
+        path = os.path.join(self._data_dir, "fonts")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _font_auto_download(self) -> bool:
+        """是否允许为补全自带字体而联网（内网/离线环境可关掉）。"""
+        return bool(self.config.get("font_auto_download", True))
+
+    async def _resolve_fonts(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """解析出卡片要用的 ``(正文字体候选, 粗体候选)``。
+
+        自带字体齐备且校验通过就直接用，**不联网**；只有缺失或校验不过的那一份
+        才去补，补回来的字节同样要过内容校验。任何失败都返回已有候选——渲染层会
+        退回系统中文字体，最坏退回纯文本列表，搜歌本身不受影响。
+
+        补全成功的那一份会顶掉同名候选；没成功时自带路径仍留在列表里，交给渲染层
+        的字形探测跳过——万一哈希不符只是版本漂移、文件本身是好的，也不至于白白
+        丢掉一份可用字体。
+        """
+        try:
+            bundled = bundled_fonts()
+            intact = {}
+            for name, path in bundled.items():
+                source = FONT_SOURCES_BY_NAME.get(name)
+                if source is not None and verify_font(path, source):
+                    intact[name] = path
+            missing = tuple(s for s in FONT_SOURCES if s.filename not in intact)
+            available = dict(bundled)
+            if missing and self._font_auto_download():
+                session = await self._get_session()
+                store = FontStore(session, self._fonts_dir(), user_agent=self._ua())
+                try:
+                    fetched = await asyncio.wait_for(
+                        store.ensure_all(missing), FONT_WAIT_SECONDS
+                    )
+                except (asyncio.TimeoutError, TimeoutError):
+                    fetched = {}
+                    logger.warning("[kugou] 补全中文字体超时，本次先用系统字体渲染卡片")
+                else:
+                    if fetched:
+                        logger.info("[kugou] 已补全中文字体：%s", "、".join(sorted(fetched)))
+                available.update(fetched)
+            return candidates_by_weight(available)
+        except Exception as exc:
+            logger.warning("[kugou] 准备卡片字体失败：%s", type(exc).__name__)
+            return (), ()
+
+    async def _preferred_fonts(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """缓存版的 ``_resolve_fonts``：补全是进程内一次性动作。
+
+        字体有 8 MB，失败之后每次搜歌都去撞一遍网络既慢又没意义；锁保证并发
+        首次渲染时只解析一次。
+        """
+        async with self._font_lock:
+            if self._fonts is None:
+                self._fonts = await self._resolve_fonts()
+            return self._fonts
+
+    def _warm_fonts(self) -> None:
+        """后台预热字体补全，让首次搜歌通常不必自己等下载。失败无所谓，静默。"""
+        if self._fonts is not None or not self._font_auto_download():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:                # 没有事件循环（离线测试）就不预热
+            return
+        self._font_task = loop.create_task(self._preferred_fonts())
 
     # ── 凭据 ─────────────────────────────────────────────────────────────
 
@@ -502,6 +594,7 @@ class KugouMusic(Star):
 
     async def initialize(self) -> None:
         logger.info("[kugou] 插件已加载：酷狗概念版 · 歌曲文件发送")
+        self._warm_fonts()
         shared_root, error = parse_shared_dir(self.config.get("shared_cache_dir", ""))
         if error:
             logger.warning("[kugou] %s（搜歌与登录仍可使用）", error)
@@ -519,6 +612,15 @@ class KugouMusic(Star):
 
     async def terminate(self) -> None:
         self._closing = True
+        task, self._font_task = self._font_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:        # 预热任务不该抛；真抛了也别再往上冒
+                logger.debug("[kugou] 字体预热任务异常结束：%s", type(exc).__name__)
         session = self._session
         self._session = None
         if session is not None and hasattr(session, "close"):
@@ -898,8 +1000,10 @@ class KugouMusic(Star):
                 if isinstance(song, dict) and song.get("cover")
             ]
             covers = await cover_cache.ensure_many(urls)
+            fonts, fonts_bold = await self._preferred_fonts()
             path = await render_search_card(
                 songs, keyword, self._search_cards_dir(), covers=covers,
+                preferred_fonts=fonts, preferred_fonts_bold=fonts_bold,
                 extra_font_candidates=self._extra_font_candidates(),
             )
         except CardRenderError as exc:

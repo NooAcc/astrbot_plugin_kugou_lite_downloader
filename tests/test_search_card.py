@@ -33,8 +33,43 @@ def test_renders_one_row_per_song_and_returns_png(tmp_path):
     path = _render(tmp_path, _SONGS)
     assert os.path.exists(path)
     with Image.open(path) as image:
-        assert image.width == 800
+        assert image.width > 0
         assert image.height > 0
+
+
+def test_card_size_is_derived_from_the_type_scale(tmp_path):
+    """尺寸不写死：宽 = 版式式，高 = 页眉 + 行高 × 歌曲数 + 页脚。
+
+    这条是「字号决定一切」的守卫——一旦有人把某个几何量重新写死，
+    等式就对不上了。
+    """
+    path = _render(tmp_path, _SONGS)
+    fonts = search_card._Fonts(extra=rendering_font_candidates())
+    with Image.open(path) as image:
+        assert image.width == search_card.layout_width(fonts)
+        assert image.height == (search_card.HEADER_H
+                                + search_card.ROW_H * len(_SONGS)
+                                + search_card.FOOTER_H)
+
+
+def test_bigger_title_font_widens_the_card(tmp_path, monkeypatch):
+    """把歌名字号调大一档，卡片必须跟着变宽（而不是让字挤在旧宽度里）。"""
+    fonts = search_card._Fonts(extra=rendering_font_candidates())
+    before = search_card.layout_width(fonts)
+    monkeypatch.setattr(search_card, "F_TITLE", search_card.F_TITLE + 6)
+    after = search_card.layout_width(fonts)
+
+    assert after - before == 6 * search_card.TITLE_CHARS
+
+
+def test_right_group_is_part_of_the_width(tmp_path, monkeypatch):
+    """右侧的「圆点 + 时长」占位也要算进宽度，否则文字会压到它上面。"""
+    fonts = search_card._Fonts(extra=rendering_font_candidates())
+    before = search_card.layout_width(fonts)
+    monkeypatch.setattr(search_card, "DUR_RESERVE", search_card.DUR_RESERVE * 3)
+    after = search_card.layout_width(fonts)
+
+    assert after > before
 
 
 def test_empty_songs_raises(tmp_path):
@@ -83,7 +118,7 @@ def test_render_falls_back_to_extra_font_when_system_fonts_absent(tmp_path, monk
 
 
 def test_system_font_wins_over_extra_fallback(tmp_path, monkeypatch):
-    """设计文档：字体发现顺序是「系统候选 → …」，``font.ttf`` 只作回退。"""
+    """查找顺序：自带/已补全字体 → 系统中文字体 → 数据目录 font.ttf（最后兜底）。"""
     system = str(tmp_path / "system.ttf")
     extra = str(tmp_path / "extra.ttf")
     write_min_cjk_font(system)
@@ -91,9 +126,50 @@ def test_system_font_wins_over_extra_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(search_card, "FONT_CANDIDATES", (system,))
     monkeypatch.setattr(search_card, "FONT_CANDIDATES_BOLD", ())
 
-    fonts = search_card._Fonts((extra,))
+    fonts = search_card._Fonts(extra=(extra,))
 
     assert os.path.samefile(fonts.get(15).path, system)
+
+
+def test_preferred_font_wins_over_system_font(tmp_path, monkeypatch):
+    """自带字体排在系统字体之前是刻意的：卡片版式按它的字宽标定，混用会跑版。"""
+    system = str(tmp_path / "system.ttf")
+    preferred = str(tmp_path / "preferred.ttf")
+    write_min_cjk_font(system)
+    write_min_cjk_font(preferred)
+    monkeypatch.setattr(search_card, "FONT_CANDIDATES", (system,))
+    monkeypatch.setattr(search_card, "FONT_CANDIDATES_BOLD", ())
+
+    fonts = search_card._Fonts((preferred,))
+
+    assert os.path.samefile(fonts.get(15).path, preferred)
+
+
+def test_missing_preferred_candidate_falls_through_to_system(tmp_path, monkeypatch):
+    """补全没成功时不能因此画不出图：候选不存在就往下走。"""
+    system = str(tmp_path / "system.ttf")
+    write_min_cjk_font(system)
+    monkeypatch.setattr(search_card, "FONT_CANDIDATES", (system,))
+    monkeypatch.setattr(search_card, "FONT_CANDIDATES_BOLD", ())
+
+    fonts = search_card._Fonts((str(tmp_path / "never-downloaded.ttf"),))
+
+    assert os.path.samefile(fonts.get(15).path, system)
+
+
+def test_bold_column_does_not_borrow_the_regular_candidate(tmp_path, monkeypatch):
+    """正文字体被塞进粗体列时，粗体应挑自己那一列，而不是把正文当粗体用。"""
+    regular = str(tmp_path / "regular.ttf")
+    bold = str(tmp_path / "bold.ttf")
+    write_min_cjk_font(regular)
+    write_min_cjk_font(bold)
+    monkeypatch.setattr(search_card, "FONT_CANDIDATES", ())
+    monkeypatch.setattr(search_card, "FONT_CANDIDATES_BOLD", ())
+
+    fonts = search_card._Fonts((regular,), preferred_bold=(bold,))
+
+    assert os.path.samefile(fonts.get(15, bold=True).path, bold)
+    assert os.path.samefile(fonts.get(15).path, regular)
 
 
 def test_wrap_with_non_positive_max_lines_returns_no_lines():
