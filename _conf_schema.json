@@ -37,6 +37,17 @@
       "step": 1
     }
   },
+  "cache_ttl_hours": {
+    "description": "缓存保留时长（小时）",
+    "type": "int",
+    "hint": "统一控制音频文件、封面图片与搜歌卡片图的保留时间。搜歌候选列表固定 5 分钟，不受此项影响。",
+    "default": 24,
+    "slider": {
+      "min": 1,
+      "max": 720,
+      "step": 1
+    }
+  },
   "timeout": {
     "description": "接口请求超时（秒）",
     "type": "int",

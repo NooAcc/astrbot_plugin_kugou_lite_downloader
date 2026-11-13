@@ -173,6 +173,10 @@ class FakeEvent:
         self.results.append(("plain", text))
         return ("plain", text)
 
+    def image_result(self, path):
+        self.results.append(("image", path))
+        return ("image", path)
+
     def chain_result(self, chain):
         text = "\n".join(
             getattr(seg, "text", "") for seg in chain

@@ -624,6 +624,39 @@ class CacheManager:
         return removed
 
 
+def prune_expired_entries(base_dir: str, ttl_seconds: float, *, clock=None) -> int:
+    """删除 `base_dir` 一级下 `mtime` 超过 TTL 的文件或目录，返回删除数量。
+
+    与 `CacheManager.cleanup` 同一套扫描规则：只扫一级、跳过符号链接与
+    reparse point（junction），不递归进出其它内容。目录不存在视为无事可做。
+    """
+    if not os.path.isdir(base_dir):
+        return 0
+    now = (clock or time.time)()
+    removed = 0
+    try:
+        entries = list(os.scandir(base_dir))
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if entry.is_symlink() or _is_reparse_point(entry.path):
+                continue
+            if now - entry.stat(follow_symlinks=False).st_mtime <= ttl_seconds:
+                continue
+        except OSError:
+            continue
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path, ignore_errors=True)
+            else:
+                os.remove(entry.path)
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
 # ── 下载 + 探针校验 + 缓存复用 ───────────────────────────────────────────
 
 

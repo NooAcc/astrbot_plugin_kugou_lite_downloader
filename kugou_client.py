@@ -33,6 +33,8 @@ except ImportError:  # 以顶层模块方式导入（离线测试）
 APPID = 3116
 CLIENTVER = 11440
 SEARCH_CLIENTVER = 201          # 概念版搜索用的 versionCode（上游 search.js: isLite → 201）
+#: 搜索结果封面模板 `union_cover` 里的 `{size}` 占位符取值（像素边长）。
+COVER_SIZE = 240
 SRCAPPID = 2919
 
 WEB_SIGN_SALT = "NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt"
@@ -241,8 +243,8 @@ class KugouClient:
     async def search(self, keyword: str, count: int) -> list[dict]:
         """搜索歌曲。优先概念版接口，失败或缺凭据时回退公共来源。
 
-        返回项：`hash, songname, singername, album_id, album_audio_id,
-        duration, pay_type`。
+        返回项：`hash, songname, singername, album, album_id, album_audio_id,
+        cover, duration, pay_type`。`cover` 是可直接请求的 https 地址（取不到为 ""）。
 
         两个来源都「应答但没有结果」时返回空列表；连公共来源都请求失败时
         让 `KugouApiError` 冒泡，使上层能区分「没搜到」与「搜索失败」。
@@ -775,12 +777,38 @@ def normalize_songs(payload: dict) -> list[dict]:
             "hash": str(hash_value),
             "songname": str(_first(item, "songname", "SongName") or ""),
             "singername": str(_first(item, "singername", "SingerName") or ""),
+            "album": str(_first(item, "AlbumName", "album_name", "AlbumSingleName") or ""),
             "album_id": "" if album_id is None else str(album_id),
             "album_audio_id": _first(item, "album_audio_id", "AlbumAudioID") or "",
+            "cover": _cover_url(item),
             "duration": duration,
             "pay_type": _to_int(_first(item, "pay_type", "PayType")),
         })
     return songs
+
+
+def _cover_url(item: dict) -> str:
+    """从 trans_param 取封面模板，替换尺寸并升级为 https。取不到返回 ""。
+
+    `trans_param` 在两种来源下都是对象，但概念版历史上出现过 JSON 字符串形态，
+    因此两种都接受；解析不出来则退回顶层 Image / AlbumImage。
+    """
+    trans = item.get("trans_param")
+    if isinstance(trans, str):
+        try:
+            trans = json.loads(trans)
+        except (TypeError, ValueError):
+            trans = None
+    template = ""
+    if isinstance(trans, dict):
+        template = str(trans.get("union_cover") or "")
+    if not template:
+        template = str(_first(item, "Image", "AlbumImage") or "")
+    if "{size}" in template:
+        template = template.replace("{size}", str(COVER_SIZE))
+    if template.startswith("http://"):
+        template = "https://" + template[len("http://"):]
+    return template if template.startswith("https://") else ""
 
 
 def _first(mapping: dict, *keys):

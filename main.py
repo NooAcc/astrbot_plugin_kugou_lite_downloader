@@ -2,9 +2,11 @@
 
 职责：AstrBot 指令、配置解析、生命周期与后台任务清理、OneBot 文件上传协调。
 协议细节在 kugou_client / kugou_login，文件与缓存安全在 file_cache，
-档位词汇表在 quality，音频头判定在 audio_probe。
+档位词汇表在 quality，音频头判定在 audio_probe，卡片渲染在 search_card，
+封面抓取在 cover_cache。
 
-只发送音频**文件附件**：不发送音乐卡片、语音、封面图片或播放直链。
+搜歌结果以本地渲染的图片卡片返回（含封面）；**下载**只发送音频**文件附件**：
+不发送音乐卡片、语音或播放直链。
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ try:
         Limits,
         SharedDirError,
         UnsafeUrlError,
+        prune_expired_entries,
     )
     from .kugou_client import (
         KG_UA,
@@ -60,7 +63,9 @@ try:
         extract_cookie_field,
         validate_cookie,
     )
+    from .cover_cache import CoverCache
     from .quality import ConfigError, parse_quality_priority
+    from .search_card import CardRenderError, render_search_card
 except ImportError:  # 以顶层模块方式导入（离线测试）
     from file_cache import (
         AudioFetcher,
@@ -70,6 +75,7 @@ except ImportError:  # 以顶层模块方式导入（离线测试）
         Limits,
         SharedDirError,
         UnsafeUrlError,
+        prune_expired_entries,
     )
     from kugou_client import (
         KG_UA,
@@ -96,12 +102,15 @@ except ImportError:  # 以顶层模块方式导入（离线测试）
         extract_cookie_field,
         validate_cookie,
     )
+    from cover_cache import CoverCache
     from quality import ConfigError, parse_quality_priority
+    from search_card import CardRenderError, render_search_card
 
 PLUGIN_DIRNAME = "astrbot_plugin_kugou_music"
 
 SEARCH_TTL_SECONDS = 300
-CACHE_TTL_SECONDS = 3600
+#: 缓存保留时长的默认值（小时）；实际值来自配置项 `cache_ttl_hours`。
+DEFAULT_CACHE_TTL_HOURS = 24
 CLEANUP_INTERVAL_SECONDS = 600        # 运行期有界清理的最小间隔
 DOWNLOAD_TIMEOUT_SECONDS = 180.0
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
@@ -261,6 +270,32 @@ class KugouMusic(Star):
     def _quality_priority(self) -> list:
         return parse_quality_priority(self.config.get("quality_priority"))
 
+    def _cache_ttl_seconds(self) -> int:
+        """缓存保留时长（秒）。非整数或小于 1 小时一律回落默认 24 小时。"""
+        try:
+            hours = int(self.config.get("cache_ttl_hours", DEFAULT_CACHE_TTL_HOURS))
+        except (TypeError, ValueError):
+            hours = DEFAULT_CACHE_TTL_HOURS
+        if hours < 1:
+            hours = DEFAULT_CACHE_TTL_HOURS
+        return hours * 3600
+
+    def _covers_dir(self) -> str:
+        """封面落盘缓存目录（插件数据目录内，与音频缓存无关）。"""
+        path = os.path.join(self._data_dir, "covers")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _search_cards_dir(self) -> str:
+        """搜歌卡片图片目录（插件数据目录内）。"""
+        path = os.path.join(self._data_dir, "search_cards")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _extra_font_candidates(self) -> tuple:
+        """额外的中文字体候选：优先用 AstrBot 数据目录自带的字体。"""
+        return (os.path.join(os.getcwd(), "data", "font.ttf"),)
+
     # ── 凭据 ─────────────────────────────────────────────────────────────
 
     def _load_saved_cookie(self) -> dict | None:
@@ -396,18 +431,26 @@ class KugouMusic(Star):
         )
 
     def _cleanup_cache(self) -> None:
-        if self._cache_manager is None:
-            return
         now = time.time()
         if now - self._last_cleanup < CLEANUP_INTERVAL_SECONDS:
             return          # 运行期清理有界且限频，避免每次下载都扫描磁盘
         self._last_cleanup = now
-        try:
-            removed = self._cache_manager.cleanup(CACHE_TTL_SECONDS)
-            if removed:
-                logger.debug("[kugou] 清理过期缓存条目：%d", removed)
-        except Exception as exc:
-            logger.warning("[kugou] 缓存清理失败：%s", type(exc).__name__)
+        ttl = self._cache_ttl_seconds()
+        if self._cache_manager is not None:
+            try:
+                removed = self._cache_manager.cleanup(ttl)
+                if removed:
+                    logger.debug("[kugou] 清理过期缓存条目：%d", removed)
+            except Exception as exc:
+                logger.warning("[kugou] 缓存清理失败：%s", type(exc).__name__)
+        # 封面与卡片在插件数据目录：没配置共享目录时搜歌仍可用，必须独立清理
+        for base in (self._covers_dir(), self._search_cards_dir()):
+            try:
+                prune_expired_entries(base, ttl)
+            except Exception as exc:
+                logger.warning(
+                    "[kugou] 清理 %s 失败：%s", os.path.basename(base), type(exc).__name__
+                )
 
     # ── 调试输出 ─────────────────────────────────────────────────────────
 
@@ -802,6 +845,9 @@ class KugouMusic(Star):
             yield event.plain_result("用法: /酷狗搜歌 <关键词>\n例如: /酷狗搜歌 晴天")
             return
 
+        # 只搜歌、从不下载的用户也必须有机会清理封面/卡片缓存（内部限频）
+        self._cleanup_cache()
+
         try:
             songs = await self._search_songs(keyword)
         except KugouApiError as exc:
@@ -826,6 +872,51 @@ class KugouMusic(Star):
         }
         self._save_search_cache()
 
+        card_path = await self._render_search_card(songs, keyword)
+        if card_path is not None:
+            try:
+                yield event.image_result(card_path)
+            except Exception as exc:
+                # 有些 OneBot 实现无法接收图片：退到纯文本，别让用户什么都没有
+                logger.warning("[kugou] 发送搜歌卡片失败：%s", type(exc).__name__)
+            else:
+                if self.config.get("debug", False):
+                    debug = self._flush_debug()
+                    if debug:
+                        yield event.plain_result(debug.lstrip("\n"))
+                return
+
+        yield event.plain_result(self._search_text_result(songs, keyword) + self._flush_debug())
+
+    async def _render_search_card(self, songs: list, keyword: str) -> str | None:
+        """抓封面并渲染卡片；任何失败返回 None（由调用方回退到纯文本）。"""
+        try:
+            session = await self._get_session()
+            cover_cache = CoverCache(session, self._covers_dir(), user_agent=self._ua())
+            urls = [
+                song.get("cover") for song in songs
+                if isinstance(song, dict) and song.get("cover")
+            ]
+            covers = await cover_cache.ensure_many(urls)
+            path = await render_search_card(
+                songs, keyword, self._search_cards_dir(), covers=covers,
+                extra_font_candidates=self._extra_font_candidates(),
+            )
+        except CardRenderError as exc:
+            logger.debug("[kugou] 搜歌卡片不可渲染，回退文本：%s", exc)
+            return None
+        except Exception as exc:
+            logger.warning("[kugou] 渲染搜歌卡片失败：%s", type(exc).__name__)
+            return None
+        try:
+            if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+                return None
+        except OSError:
+            return None
+        return path
+
+    def _search_text_result(self, songs: list, keyword: str) -> str:
+        """纯文本回退（也是无图环境下的正常输出）。"""
         lines = [f"[酷狗搜索] 「{keyword}」共找到 {len(songs)} 首歌:"]
         for index, song in enumerate(songs, 1):
             duration = ""
@@ -835,7 +926,7 @@ class KugouMusic(Star):
             vip = " [VIP]" if song.get("pay_type") == 3 else ""
             lines.append(f"{index}. {song['songname']} - {song['singername']}{duration}{vip}")
         lines.append("\n发送 /酷狗下载 序号 获取歌曲文件")
-        yield event.plain_result("\n".join(lines) + self._flush_debug())
+        return "\n".join(lines)
 
     # ── 下载指令 ─────────────────────────────────────────────────────────
 

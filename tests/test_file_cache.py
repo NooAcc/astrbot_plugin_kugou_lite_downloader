@@ -583,3 +583,50 @@ def test_concurrent_same_resource_downloads_once(tmp_path):
 def test_concurrency_is_capped(tmp_path):
     fetcher, _, _ = _make_fetcher(tmp_path, [])
     assert fetcher.limits.max_concurrency == 2
+
+
+# ── 通用目录清理（封面 / 卡片缓存用） ────────────────────────────────────
+
+
+def test_prune_expired_entries_removes_old_and_keeps_new(tmp_path):
+    from file_cache import prune_expired_entries
+
+    old_file = tmp_path / "old.img"
+    new_file = tmp_path / "new.img"
+    old_dir = tmp_path / "old_dir"
+    old_dir.mkdir()
+    for path in (old_file, new_file):
+        path.write_bytes(b"x")
+    (old_dir / "inner").write_bytes(b"x")
+
+    stale = time.time() - 25 * 3600
+    os.utime(str(old_file), (stale, stale))
+    os.utime(str(old_dir), (stale, stale))
+
+    removed = prune_expired_entries(str(tmp_path), 24 * 3600)
+
+    assert removed == 2                       # 老文件 + 老目录
+    assert not old_file.exists() and not old_dir.exists()
+    assert new_file.exists()
+
+
+def test_prune_expired_entries_tolerates_missing_dir(tmp_path):
+    from file_cache import prune_expired_entries
+
+    assert prune_expired_entries(str(tmp_path / "nope"), 10) == 0
+
+
+def test_prune_expired_entries_skips_symlink(tmp_path):
+    from file_cache import prune_expired_entries
+
+    target = tmp_path / "target.txt"
+    target.write_bytes(b"x")
+    link = tmp_path / "link.txt"
+    try:
+        os.symlink(str(target), str(link))
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不支持创建符号链接")
+
+    prune_expired_entries(str(tmp_path), 0)   # TTL=0：能删的都删
+
+    assert link.is_symlink()                  # 链接本身不被删除

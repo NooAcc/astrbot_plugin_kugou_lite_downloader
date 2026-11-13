@@ -795,15 +795,27 @@ def _search_event(message="酷狗搜歌 晴天", **kwargs):
     return FakeEvent(message, **kwargs)
 
 
+def _stub_card(plugin):
+    """出图替身：写一个真实存在的文件并返回路径（不真的渲染）。"""
+
+    async def render(songs, keyword):
+        path = os.path.join(plugin._search_cards_dir(), "stub.png")
+        with open(path, "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n")
+        return path
+
+    return render
+
+
 def test_search_lists_results_and_caches_per_user(plugin_factory, monkeypatch):
     plugin = plugin_factory({"search_count": 2})
     monkeypatch.setattr(plugin, "_search_songs", _fixed_search([_SONG]))
+    monkeypatch.setattr(plugin, "_render_search_card", _stub_card(plugin))
 
     first = _search_event(sender_id="42")
     collect(plugin.cmd_search(first))
 
-    assert "晴天" in first.text and "周杰伦" in first.text and "[4:29]" in first.text
-    assert "酷狗下载" in first.text
+    assert [kind for kind, _ in first.results] == ["image"]
     assert len(plugin._search_cache) == 1
     assert plugin._search_cache[search_cache_key(first)]["songs"][0]["hash"] == "H1"
 
@@ -845,6 +857,7 @@ def test_search_prunes_expired_entries(plugin_factory, monkeypatch):
     plugin = plugin_factory()
     plugin._search_cache["stale|1"] = {"songs": [], "expire_at": time.time() - 10}
     monkeypatch.setattr(plugin, "_search_songs", _fixed_search([_SONG]))
+    monkeypatch.setattr(plugin, "_render_search_card", _stub_card(plugin))
 
     collect(plugin.cmd_search(_search_event()))
 
@@ -1251,3 +1264,167 @@ def test_ladder_for_download_runs_bounded_cleanup(plugin_factory, shared_dir, mo
     asyncio.run(plugin._ladder_for_download())
 
     assert called == [1, 1]        # 每次下载筹备都触发一次（内部再限频）
+
+
+# ── 缓存 TTL 与清理 ──────────────────────────────────────────────────────
+
+
+def test_cache_ttl_defaults_to_24h_and_rejects_bad_values(plugin_factory):
+    assert plugin_factory({})._cache_ttl_seconds() == 24 * 3600
+    assert plugin_factory({"cache_ttl_hours": 2})._cache_ttl_seconds() == 2 * 3600
+    assert plugin_factory({"cache_ttl_hours": 0})._cache_ttl_seconds() == 24 * 3600
+    assert plugin_factory({"cache_ttl_hours": "x"})._cache_ttl_seconds() == 24 * 3600
+
+
+def test_cleanup_prunes_covers_and_cards_without_shared_dir(plugin_factory):
+    # 未配置共享目录时搜歌仍可用，因此封面/卡片缓存也必须照样按 TTL 清理
+    plugin = plugin_factory({"cache_ttl_hours": 24})
+    assert plugin._cache_manager is None
+
+    stale = time.time() - 25 * 3600
+    stale_paths, fresh_paths = [], []
+    for directory in (plugin._covers_dir(), plugin._search_cards_dir()):
+        os.makedirs(directory, exist_ok=True)
+        old = os.path.join(directory, "stale.bin")
+        fresh = os.path.join(directory, "fresh.bin")
+        for path in (old, fresh):
+            with open(path, "wb") as handle:
+                handle.write(b"x")
+        os.utime(old, (stale, stale))
+        stale_paths.append(old)
+        fresh_paths.append(fresh)
+
+    plugin._last_cleanup = 0
+    plugin._cleanup_cache()
+
+    assert not any(os.path.exists(p) for p in stale_paths)
+    assert all(os.path.exists(p) for p in fresh_paths)
+    assert main.SEARCH_TTL_SECONDS == 300       # 搜歌候选列表窗口不受影响
+
+
+# ── 搜歌出图与回退 ───────────────────────────────────────────────────────
+
+
+def test_search_sends_image_card(plugin_factory, monkeypatch):
+    plugin = plugin_factory()
+    monkeypatch.setattr(plugin, "_search_songs", _fixed_search([_SONG]))
+    monkeypatch.setattr(plugin, "_render_search_card", _stub_card(plugin))
+
+    event = _search_event()
+    collect(plugin.cmd_search(event))
+
+    assert [kind for kind, _ in event.results] == ["image"]
+    assert os.path.isfile(event.results[0][1])
+
+
+def test_search_falls_back_to_text_when_render_fails(plugin_factory, monkeypatch):
+    plugin = plugin_factory()
+    monkeypatch.setattr(plugin, "_search_songs", _fixed_search([_SONG]))
+
+    async def no_card(songs, keyword):
+        return None
+
+    monkeypatch.setattr(plugin, "_render_search_card", no_card)
+
+    event = _search_event()
+    collect(plugin.cmd_search(event))
+
+    assert "晴天" in event.text and "酷狗下载" in event.text
+    assert all(kind == "plain" for kind, _ in event.results)
+
+
+def test_search_falls_back_to_text_when_image_result_raises(plugin_factory, monkeypatch):
+    plugin = plugin_factory()
+    monkeypatch.setattr(plugin, "_search_songs", _fixed_search([_SONG]))
+    monkeypatch.setattr(plugin, "_render_search_card", _stub_card(plugin))
+
+    event = _search_event()
+
+    def refuse(path):
+        raise RuntimeError("平台拒绝图片")
+
+    monkeypatch.setattr(event, "image_result", refuse)
+    collect(plugin.cmd_search(event))
+
+    plains = [payload for kind, payload in event.results if kind == "plain"]
+    assert len(plains) == 1                       # 只补发一次文本，不重复发图
+    assert "晴天" in plains[0] and "酷狗下载" in plains[0]
+
+
+def test_search_no_results_still_text(plugin_factory, monkeypatch):
+    plugin = plugin_factory()
+    monkeypatch.setattr(plugin, "_search_songs", _fixed_search([]))
+
+    event = _search_event()
+    collect(plugin.cmd_search(event))
+
+    assert "未找到" in event.text
+    assert all(kind == "plain" for kind, _ in event.results)
+
+
+def test_render_search_card_returns_none_when_rendering_fails(plugin_factory, monkeypatch):
+    plugin = plugin_factory()
+    plugin._session = FakeSession([])
+
+    async def boom(*args, **kwargs):
+        raise main.CardRenderError("没有中文字体")
+
+    monkeypatch.setattr(main, "render_search_card", boom)
+
+    assert asyncio.run(plugin._render_search_card([_SONG], "晴天")) is None
+
+
+def test_render_search_card_passes_downloaded_covers(plugin_factory, monkeypatch):
+    plugin = plugin_factory()
+    plugin._session = FakeSession([])
+    captured = {}
+
+    class _StubCache:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def ensure_many(self, urls):
+            captured["urls"] = list(urls)
+            return {url: "local-cover" for url in urls}
+
+    async def fake_render(songs, keyword, output_dir, *, covers=None, **kwargs):
+        captured["covers"] = covers
+        path = os.path.join(str(output_dir), "card.png")
+        with open(path, "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n")
+        return path
+
+    monkeypatch.setattr(main, "CoverCache", _StubCache)
+    monkeypatch.setattr(main, "render_search_card", fake_render)
+
+    song = dict(_SONG, cover="https://imge.kugou.com/x.jpg")
+    path = asyncio.run(plugin._render_search_card([song], "晴天"))
+
+    assert path is not None and os.path.isfile(path)
+    assert captured["covers"] == {"https://imge.kugou.com/x.jpg": "local-cover"}
+
+
+def test_search_runs_bounded_cleanup(plugin_factory, monkeypatch):
+    # 只搜歌、从不下载的用户也必须有机会清理封面/卡片缓存
+    plugin = plugin_factory()
+    monkeypatch.setattr(plugin, "_search_songs", _fixed_search([_SONG]))
+    monkeypatch.setattr(plugin, "_render_search_card", _stub_card(plugin))
+    called = []
+    monkeypatch.setattr(plugin, "_cleanup_cache", lambda: called.append(1))
+
+    collect(plugin.cmd_search(_search_event()))
+
+    assert called == [1]
+
+
+def test_search_image_card_appends_debug_text(plugin_factory, monkeypatch):
+    plugin = plugin_factory({"debug": True})
+    monkeypatch.setattr(plugin, "_search_songs", _fixed_search([_SONG]))
+    monkeypatch.setattr(plugin, "_render_search_card", _stub_card(plugin))
+    plugin._debug = [{"action": "search", "keyword": "晴天"}]
+
+    event = _search_event()
+    collect(plugin.cmd_search(event))
+
+    assert [kind for kind, _ in event.results] == ["image", "plain"]
+    assert "[_debug]" in event.results[1][1]

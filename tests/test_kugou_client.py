@@ -788,3 +788,37 @@ def test_download_outcome_is_frozen_dataclass():
                               info=None, url="", from_cache=False)
     with pytest.raises(Exception):
         outcome.tier = "hires"
+
+
+# ── 归一化：专辑与封面 ───────────────────────────────────────────────────
+
+
+def test_normalize_adds_album_and_cover_url():
+    payload = {"status": 1, "data": {"info": [{
+        "hash": "H1", "songname": "晴天", "singername": "周杰伦", "duration": 269,
+        "AlbumName": "叶惠美",
+        "trans_param": {"union_cover": "http://imge.kugou.com/stdmusic/{size}/x.jpg"},
+    }]}}
+    client, _ = _client([json_response(payload)])
+    song = asyncio.run(client.search("x", 1))[0]
+    assert song["album"] == "叶惠美"
+    assert song["cover"] == "https://imge.kugou.com/stdmusic/240/x.jpg"
+
+
+def test_normalize_reads_trans_param_from_json_string():
+    import json as _json
+    payload = {"status": 1, "data": {"info": [{
+        "hash": "H1", "songname": "a", "singername": "b",
+        "trans_param": _json.dumps(
+            {"union_cover": "http://imge.kugou.com/stdmusic/{size}/y.jpg"}),
+    }]}}
+    client, _ = _client([json_response(payload)])
+    song = asyncio.run(client.search("x", 1))[0]
+    assert song["cover"] == "https://imge.kugou.com/stdmusic/240/y.jpg"
+
+
+def test_normalize_missing_album_and_cover_are_empty():
+    payload = {"status": 1, "data": {"info": [{"FileHash": "AA", "SongName": "x"}]}}
+    client, _ = _client([json_response(payload)])
+    song = asyncio.run(client.search("x", 1))[0]
+    assert song["album"] == "" and song["cover"] == ""
