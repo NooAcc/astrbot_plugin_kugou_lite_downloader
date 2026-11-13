@@ -64,14 +64,7 @@ try:
         validate_cookie,
     )
     from .cover_cache import CoverCache
-    from .font_store import (
-        FONT_SOURCES,
-        FONT_SOURCES_BY_NAME,
-        FontStore,
-        bundled_fonts,
-        candidates_by_weight,
-        verify_font,
-    )
+    from .font_store import FontStore, candidates_by_weight
     from .quality import ConfigError, parse_quality_priority
     from .search_card import CardRenderError, render_search_card
 except ImportError:  # 以顶层模块方式导入（离线测试）
@@ -111,14 +104,7 @@ except ImportError:  # 以顶层模块方式导入（离线测试）
         validate_cookie,
     )
     from cover_cache import CoverCache
-    from font_store import (
-        FONT_SOURCES,
-        FONT_SOURCES_BY_NAME,
-        FontStore,
-        bundled_fonts,
-        candidates_by_weight,
-        verify_font,
-    )
+    from font_store import FontStore, candidates_by_weight
     from quality import ConfigError, parse_quality_priority
     from search_card import CardRenderError, render_search_card
 
@@ -134,7 +120,7 @@ MAX_CONCURRENT_DOWNLOADS = 2
 QR_LOGIN_TIMEOUT_SECONDS = 100       # 二维码消息发出后的硬截止：保证可撤回
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_POLL_INTERVAL = 2.0
-FONT_WAIT_SECONDS = 20.0             # 首次渲染愿为「补全自带字体」等待的上限
+FONT_WAIT_SECONDS = 20.0             # 首次渲染愿为「取回卡片字体」等待的上限
 SEARCH_USAGE = (
     "用法: /搜歌 <关键词> [序号]\n"
     "  /搜歌 晴天      只搜索\n"
@@ -276,7 +262,7 @@ class KugouMusic(Star):
         self._device: Device | None = None
         self._last_cleanup = 0.0
 
-        # 卡片字体候选（自带 → 已补全），首次解析后缓存；补全只做一次
+        # 卡片字体候选（镜像取回 → AstrBot 默认字体），首次解析后缓存；取回只做一次
         self._fonts: tuple[tuple[str, ...], tuple[str, ...]] | None = None
         self._font_lock = asyncio.Lock()
         self._font_task: asyncio.Task | None = None
@@ -323,61 +309,59 @@ class KugouMusic(Star):
         os.makedirs(path, exist_ok=True)
         return path
 
-    def _extra_font_candidates(self) -> tuple:
-        """额外的中文字体候选：自带/补全/系统字体全不可用时才回退到数据目录 font.ttf。"""
-        return (os.path.join(os.getcwd(), "data", "font.ttf"),)
+    def _astrbot_default_fonts(self, bold: bool) -> tuple[str, ...]:
+        """AstrBot 自己的默认字体：数据目录下的 ``font.ttf`` / ``font-bold.ttf``。
+
+        这正是 AstrBot 渲染自己图片时的首选（见 astrbot/core/utils/t2i/
+        local_strategy.py），所以它排在渲染层的系统字体候选之前：操作者特意放进
+        数据目录的那份字体，没有理由被微软雅黑之类的系统字体顶掉。
+        """
+        return (os.path.join(os.getcwd(), "data",
+                             "font-bold.ttf" if bold else "font.ttf"),)
 
     def _fonts_dir(self) -> str:
-        """补全字体的落盘目录（插件数据目录内，与封面、卡片图无关）。"""
+        """字体落盘目录（插件数据目录内，与封面、卡片图无关）。"""
         path = os.path.join(self._data_dir, "fonts")
         os.makedirs(path, exist_ok=True)
         return path
 
     def _font_auto_download(self) -> bool:
-        """是否允许为补全自带字体而联网（内网/离线环境可关掉）。"""
+        """是否允许为取回卡片字体而联网（内网/离线环境可关掉）。"""
         return bool(self.config.get("font_auto_download", True))
 
     async def _resolve_fonts(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         """解析出卡片要用的 ``(正文字体候选, 粗体候选)``。
 
-        自带字体齐备且校验通过就直接用，**不联网**；只有缺失或校验不过的那一份
-        才去补，补回来的字节同样要过内容校验。任何失败都返回已有候选——渲染层会
-        退回系统中文字体，最坏退回纯文本列表，搜歌本身不受影响。
-
-        补全成功的那一份会顶掉同名候选；没成功时自带路径仍留在列表里，交给渲染层
-        的字形探测跳过——万一哈希不符只是版本漂移、文件本身是好的，也不至于白白
-        丢掉一份可用字体。
+        字体不随插件分发，来路只有镜像：已经就位且校验通过的那份直接用（不发
+        请求），缺哪份就按 ``font_auto_download`` 去取哪份，取回来的字节同样要过
+        内容校验。一份都拿不到时退回 AstrBot 默认字体，再不行才是系统字体——卡片
+        跑版总好过没有卡片，搜歌本身也不受任何影响。
         """
+        available: dict[str, str] = {}
         try:
-            bundled = bundled_fonts()
-            intact = {}
-            for name, path in bundled.items():
-                source = FONT_SOURCES_BY_NAME.get(name)
-                if source is not None and verify_font(path, source):
-                    intact[name] = path
-            missing = tuple(s for s in FONT_SOURCES if s.filename not in intact)
-            available = dict(bundled)
-            if missing and self._font_auto_download():
-                session = await self._get_session()
-                store = FontStore(session, self._fonts_dir(), user_agent=self._ua())
+            session = await self._get_session()
+            store = FontStore(session, self._fonts_dir(), user_agent=self._ua())
+            if not self._font_auto_download():
+                available = store.available()
+            else:
                 try:
-                    fetched = await asyncio.wait_for(
-                        store.ensure_all(missing), FONT_WAIT_SECONDS
+                    available = await asyncio.wait_for(
+                        store.ensure_all(), FONT_WAIT_SECONDS
                     )
                 except (asyncio.TimeoutError, TimeoutError):
-                    fetched = {}
-                    logger.warning("[kugou] 补全中文字体超时，本次先用系统字体渲染卡片")
+                    available = store.available()
+                    logger.warning("[kugou] 获取中文字体超时，本次先用 AstrBot 默认字体渲染卡片")
                 else:
-                    if fetched:
-                        logger.info("[kugou] 已补全中文字体：%s", "、".join(sorted(fetched)))
-                available.update(fetched)
-            return candidates_by_weight(available)
+                    if available:
+                        logger.info("[kugou] 中文字体已就位：%s", "、".join(sorted(available)))
         except Exception as exc:
             logger.warning("[kugou] 准备卡片字体失败：%s", type(exc).__name__)
-            return (), ()
+        regular, bold = candidates_by_weight(available)
+        return (regular or self._astrbot_default_fonts(False),
+                bold or self._astrbot_default_fonts(True))
 
     async def _preferred_fonts(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """缓存版的 ``_resolve_fonts``：补全是进程内一次性动作。
+        """缓存版的 ``_resolve_fonts``：取回字体是进程内一次性动作。
 
         字体有 8 MB，失败之后每次搜歌都去撞一遍网络既慢又没意义；锁保证并发
         首次渲染时只解析一次。
@@ -388,7 +372,7 @@ class KugouMusic(Star):
             return self._fonts
 
     def _warm_fonts(self) -> None:
-        """后台预热字体补全，让首次搜歌通常不必自己等下载。失败无所谓，静默。"""
+        """后台预热字体取回，让首次搜歌通常不必自己等下载。失败无所谓，静默。"""
         if self._fonts is not None or not self._font_auto_download():
             return
         try:
@@ -1047,7 +1031,6 @@ class KugouMusic(Star):
             path = await render_search_card(
                 songs, keyword, self._search_cards_dir(), covers=covers,
                 preferred_fonts=fonts, preferred_fonts_bold=fonts_bold,
-                extra_font_candidates=self._extra_font_candidates(),
             )
         except CardRenderError as exc:
             logger.debug("[kugou] 搜歌卡片不可渲染，回退文本：%s", exc)

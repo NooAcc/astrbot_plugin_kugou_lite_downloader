@@ -1,32 +1,31 @@
-"""自带中文字体补全：校验、下载、SSRF、失败降级。
+"""中文字体取回：校验、下载、SSRF、失败降级。
 
-这些用例直接拿仓库里真实的自带字体当样本——它既是被测对象要保护的资源，也是
-最真实的输入：能通过校验说明 `test_bundled_fonts_match_pinned_hashes` 之外的
-所有路径都拿的是同一份文件。
+字体不再随插件分发，测试样本改为现场生成的最小中文字体（``cjk_font``）：它同样
+要能过 ``verify`` 的四关（字节数、哈希、可加载、真有汉字），所以拿它当载荷足以
+覆盖下载与校验的每条分支。镜像上那份字节与钉死值是否一致，由
+``CHECK_FONT_MIRROR=1`` 时运行的 ``test_mirror_serves_the_pinned_bytes`` 盯住。
 """
 
 import asyncio
 import hashlib
 import os
+import urllib.request
 
 import pytest
 
-import font_store
+from cjk_font import write_min_cjk_font
 from fake_session import FakeResponse, FakeSession, reading
 from font_store import ALLOWED_FONT_SUFFIXES, FONT_BASE_URL, FONT_SOURCES, FontLimits, FontSource, FontStore
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_BUNDLED_DIR = os.path.join(_REPO_ROOT, "resources", "fonts")
 _URL = FONT_BASE_URL + "Test_Font.ttf"
 
 
 @pytest.fixture(scope="module")
-def regular_bytes():
-    path = os.path.join(_BUNDLED_DIR, "HarmonyOS_Sans_SC_Regular.ttf")
-    if not os.path.isfile(path):
-        pytest.skip("仓库自带字体缺失")
-    with open(path, "rb") as handle:
-        return handle.read()
+def regular_bytes(tmp_path_factory):
+    """样本字体字节：只映射「永」一个字，够 verify 用。"""
+    path = tmp_path_factory.mktemp("font") / "sample.ttf"
+    write_min_cjk_font(str(path))
+    return path.read_bytes()
 
 
 def _public_resolver(host):
@@ -55,19 +54,25 @@ def _run(coro):
 
 # ── 校验 ─────────────────────────────────────────────────────────────────
 
-def test_bundled_fonts_match_pinned_hashes():
-    """仓库里的字体必须与 `FONT_SOURCES` 钉死的校验值一致。
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
-    否则「校验」保护的是一份对不上的文件：要么误判自带字体损坏，要么把
-    被替换过的文件当成合法的。
+
+@pytest.mark.skipif(os.environ.get("CHECK_FONT_MIRROR") != "1",
+                    reason="需要联网；CHECK_FONT_MIRROR=1 时运行")
+def test_mirror_serves_the_pinned_bytes():
+    """镜像上那两份字节必须与 ``FONT_SOURCES`` 钉死的值一致。
+
+    字体不再随插件分发，``sha256`` / ``size`` 就是唯一的完整性锚点：它们一旦
+    漂移，所有新装用户都取不回字体（只会退到 AstrBot 默认字体）。改字体版本时
+    手动跑一次：``CHECK_FONT_MIRROR=1 python -m pytest tests/test_font_store.py -q``。
     """
     for source in FONT_SOURCES:
-        path = os.path.join(_BUNDLED_DIR, source.filename)
-        assert os.path.isfile(path), f"自带字体缺失：{source.filename}"
-        with open(path, "rb") as handle:
-            data = handle.read()
+        request = urllib.request.Request(FONT_BASE_URL + source.filename)
+        with urllib.request.urlopen(request, timeout=120) as resp:
+            data = resp.read()
         assert len(data) == source.size, source.filename
-        assert hashlib.sha256(data).hexdigest() == source.sha256, source.filename
+        assert _sha256(data) == source.sha256, source.filename
 
 
 def test_verify_accepts_matching_file(tmp_path, regular_bytes):

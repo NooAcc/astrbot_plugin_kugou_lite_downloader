@@ -1,13 +1,11 @@
-"""自带中文字体的补全。
+"""中文字体的远端获取与内容校验。
 
-插件随包分发 HarmonyOS Sans SC（Regular + Bold，见 ``resources/fonts/``）。搜歌卡片
-的观感完全依赖这份字体：**每一个字号的字形、每一处字宽都按它标定**，换成系统里
-别的中文字体，行宽与折行位置就都变了。
+搜歌卡片的观感完全依赖 HarmonyOS Sans SC（Regular + Bold）：**每一个字号的字形、
+每一处字宽都按它标定**，换成系统里别的中文字体，行宽与折行位置就都变了。
 
-那为什么还要下载？因为「随包分发」并不总是成立：插件被解压/升级时漏掉大文件、
-用户手动删掉过、同步工具截断过——任何一种都会让卡片悄悄换回系统字体。所以这里
-兜一条补全路径：**检测到缺失才去约定的镜像取回**，取回的字节按钉死的
-``sha256`` 校验，不匹配一律丢弃。
+字体**不随插件分发**（两份共 16 MB，会让插件本身的更新包大得离谱），只有一条
+来路：从约定的镜像取回，取回的字节按钉死的 ``sha256`` 与字节数校验，不匹配一律
+丢弃。取不回来时由调用方回退到 AstrBot 默认字体，卡片会跑版但不会没有卡片。
 
 约束（与 ``cover_cache`` / ``file_cache`` 同一套规矩）：
 
@@ -45,7 +43,7 @@ _FONT_PROBE_SIZE = 24
 
 @dataclass(frozen=True)
 class FontSource:
-    """一份可补全的字体：文件名、字节数与内容哈希，三者都必须对上。
+    """一份可从镜像取回的字体：文件名、字节数与内容哈希，三者都必须对上。
 
     ``bold`` 只用来把候选拆成「正文列」与「粗体列」——渲染层查找新字体时要拿
     对应的字重，混在一起会让粗体槽位挑中常规字体，标题就没了字重对比。
@@ -57,11 +55,12 @@ class FontSource:
     bold: bool = False
 
 
-#: 补全来源：Gitee 上的 HarmonyOS Sans 镜像。仓库打包是 MIT（© 2021-2022 IKKI2000），
+#: 字体来路：Gitee 上的 HarmonyOS Sans 镜像。仓库打包是 MIT（© 2021-2022 IKKI2000），
 #: 字体本体是华为 HarmonyOS Sans 免费可商用授权；两份说明见 ``LICENSES/``。
 #:
 #: ``sha256`` / ``size`` 是**内容钉**：镜像上的文件被替换、被截断、被投毒，都会在
-#: 这里被挡下。要升级字体版本，必须同时更新 ``resources/fonts/`` 里的资源。
+#: 这里被挡下——字体不再随插件分发，这两项就是唯一的完整性锚点。要升级字体版本，
+#: 必须同时改这两项，并确认镜像上那份新字节与之相符。
 FONT_BASE_URL = "https://gitee.com/IKKI2000/harmonyos-fonts/raw/main/fonts/HarmonyOS_Sans_SC/"
 ALLOWED_FONT_SUFFIXES: tuple[str, ...] = (".gitee.com", ".giteeusercontent.com")
 FONT_SOURCES: tuple[FontSource, ...] = (
@@ -77,30 +76,6 @@ FONT_SOURCES: tuple[FontSource, ...] = (
         bold=True,
     ),
 )
-
-#: 随插件分发的字体目录。补全逻辑把它当成「本来就应该有的那一份」：
-#: 这里丢文件才是补全路径的触发条件。
-BUNDLED_FONT_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "resources", "fonts"
-)
-
-
-def bundled_fonts(sources: tuple[FontSource, ...] = FONT_SOURCES) -> dict[str, str]:
-    """自带字体目录里实际存在的文件：``{文件名: 路径}``（只查存在，不校验）。
-
-    校验交给 :func:`verify_font`：它要读 16 MB，属于「启动预热」该付的成本，
-    不该挂在每次搜歌的路径上。
-    """
-    found: dict[str, str] = {}
-    for source in sources:
-        path = os.path.join(BUNDLED_FONT_DIR, source.filename)
-        if os.path.isfile(path):
-            found[source.filename] = path
-    return found
-
-
-#: 按文件名取 ``FontSource``（文件名是固定枚举，不接受调用方拼路径）。
-FONT_SOURCES_BY_NAME: dict[str, FontSource] = {s.filename: s for s in FONT_SOURCES}
 
 
 def verify_font(path: str, source: FontSource) -> bool:
@@ -137,7 +112,7 @@ def candidates_by_weight(
 
 @dataclass(frozen=True)
 class FontLimits:
-    """补全路径的内部安全默认值（不作为插件配置项暴露）。"""
+    """取回路径的内部安全默认值（不作为插件配置项暴露）。"""
 
     max_bytes: int = 12 * 1024 * 1024
     timeout: float = 60.0
@@ -145,7 +120,7 @@ class FontLimits:
 
 
 class FontStore:
-    """字体补全：``ensure_all`` 失败返回空映射，从不抛错。"""
+    """字体取回：``ensure_all`` 失败返回空映射，从不抛错。"""
 
     def __init__(self, session, cache_dir: str, *, resolver=None, clock=None,
                  limits: FontLimits | None = None, user_agent: str = "",
@@ -183,10 +158,10 @@ class FontStore:
                 found[source.filename] = path
         return found
 
-    # ── 补全 ─────────────────────────────────────────────────────────────
+    # ── 取回 ─────────────────────────────────────────────────────────────
 
     async def ensure_all(self, sources: tuple[FontSource, ...] | None = None) -> dict[str, str]:
-        """逐份补全指定字体（默认全部）；已就位的直接返回，不发请求。"""
+        """逐份取回指定字体（默认全部）；已就位的直接返回，不发请求。"""
         ensured: dict[str, str] = {}
         for source in (self._sources if sources is None else sources):
             path = await self.ensure_one(source)
@@ -211,7 +186,7 @@ class FontStore:
     def _store(self, data: bytes, path: str, source: FontSource) -> str | None:
         try:
             os.makedirs(self._dir, exist_ok=True)
-            # 临时名每次唯一：两个进程同时补全时若共用一个 .part，先落盘的那次会把
+            # 临时名每次唯一：两个进程同时取回时若共用一个 .part，先落盘的那次会把
             # 文件搬走，后落盘的那次 os.replace 就找不到它了（Windows 上直接失败）。
             tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex}.part"
             with open(tmp, "wb") as handle:

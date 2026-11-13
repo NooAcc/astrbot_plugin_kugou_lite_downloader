@@ -88,7 +88,8 @@ PLACEHOLDER_TOP = (238, 240, 242)
 PLACEHOLDER_BOTTOM = (228, 231, 234)
 
 #: 正文字体候选（按优先级；必须含中文字形，否则视为不可用）。
-#: 自带字体与补全字体由调用方通过 ``preferred_fonts*`` 排在更前面。
+#: 调用方给的中文字体（镜像取回的 HarmonyOS / AstrBot 默认字体）由
+#: ``preferred_fonts*`` 排在更前面。
 FONT_CANDIDATES: tuple[str, ...] = (
     "C:/Windows/Fonts/msyh.ttc",
     "/System/Library/Fonts/PingFang.ttc",
@@ -181,8 +182,9 @@ def cjk_font_available(preferred: Sequence[str] = (), extra_candidates: tuple[st
 class _Fonts:
     """按需加载并缓存字号。
 
-    查找顺序：``preferred``（自带 / 已补全的中文字体）→ 系统中文字体 → ``extra``。
-    自带字体排在最前是刻意的：卡片版式是按它的字宽标定的，混用系统字体就会跑版。
+    查找顺序：``preferred``（调用方给的中文字体）→ 系统中文字体 → ``extra``。
+    ``preferred`` 排在最前是刻意的：卡片版式是按 HarmonyOS Sans SC 的字宽标定的，
+    混用系统字体就会跑版。
     """
 
     def __init__(self, preferred: Sequence[str] = (), *,

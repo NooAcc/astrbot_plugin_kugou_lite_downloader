@@ -7,7 +7,7 @@
 ## 特性
 
 - **搜歌取文件**：`/搜歌 <关键词>` 返回一张带封面的图片卡片（序号 / 封面 / 歌名 / 歌手 · 专辑 / 时长），再按卡片编号 `/搜歌 <关键词> <序号>` 获取歌曲文件——**关键词必填**，序号只是后缀，没有单独的「按序号下载」入口
-  - 卡片用**随插件分发**的 HarmonyOS Sans SC 渲染，跨平台观感一致；字体缺失或损坏时会自动从固定镜像补全（见 `font_auto_download`）
+  - 卡片用 HarmonyOS Sans SC 渲染，跨平台观感一致；字体**不随插件分发**（16 MB 会拖累插件更新），首次使用时从固定镜像取回（见 `font_auto_download`）
 - **音质优先级**：WebUI 配置 `quality_priority`，默认 `Hi-Res → FLAC → 高品 320 → 标准 128`
   - 逐档位尝试；某档位无资源、无权限或格式不可用时自动降级
   - 下载后按音频头实测规格判定档位，达标才发送；实测档位高于请求档位也算达标
@@ -59,7 +59,7 @@
 | `kugou_ua` | 自定义 User-Agent，留空使用概念版客户端 UA | 空 |
 | `search_count` | 每次搜索返回条数（1-10） | `5` |
 | `cache_ttl_hours` | 缓存保留时长（小时），统一控制音频文件、封面图片与搜歌卡片图 | `24` |
-| `font_auto_download` | 自带中文字体缺失/损坏时，允许从固定镜像取回并按内容校验后补全；内网/离线环境可关闭，此时卡片退回系统中文字体 | `true` |
+| `font_auto_download` | 卡片字体不再随插件分发：允许从固定镜像取回并按内容校验后落盘；内网/离线环境可关闭，此时卡片退回 AstrBot 默认字体 | `true` |
 | `timeout` | 接口请求超时（秒） | `15` |
 | `debug` | 在回复末尾附加 `_debug` JSON（凭据/签名/设备指纹/直链自动脱敏） | `false` |
 
@@ -80,7 +80,7 @@
 - HTML/JSON 错误页、加密数据、不可识别容器一律拒绝，绝不命名为音频发送
 - 实测时长明显短于搜索结果时长（超过 10% 偏差）时判定为**试听片段**，不当作完整歌曲发送
 
-内部安全默认值（不暴露为配置项）：单次下载上限 200 MiB、下载超时 180 秒、并发下载 2 个、封面单张上限 8 MiB / 超时 5 秒 / 并发 3、搜歌候选列表 5 分钟、字体单份上限 12 MiB / 单份超时 60 秒 / 首次搜歌最多为补全等待 20 秒。音频、封面与卡片三类缓存的保留时长由 `cache_ttl_hours` 统一控制（默认 24 小时）。
+内部安全默认值（不暴露为配置项）：单次下载上限 200 MiB、下载超时 180 秒、并发下载 2 个、封面单张上限 8 MiB / 超时 5 秒 / 并发 3、搜歌候选列表 5 分钟、字体单份上限 12 MiB / 单份超时 60 秒 / 首次搜歌最多为取回字体等待 20 秒。音频、封面与卡片三类缓存的保留时长由 `cache_ttl_hours` 统一控制（默认 24 小时）。
 
 ## 卡片渲染与字体
 
@@ -95,16 +95,20 @@
 
 字体来源按优先级排列：
 
-1. `resources/fonts/` 下随插件分发的 HarmonyOS Sans SC（默认）
-2. 补全到插件数据目录 `fonts/` 的那一份（仅在自带字体缺失或校验不过时才存在）
+1. 从镜像取回、落在插件数据目录 `fonts/` 并校验通过的 HarmonyOS Sans SC（默认）
+2. 数据目录下的 `data/font.ttf` / `font-bold.ttf`——AstrBot 自己的默认字体
 3. 系统中文字体（msyh / PingFang / Noto CJK / 文泉驿…）
-4. 数据目录下的 `data/font.ttf`（最后兜底）
 
-自带字体排在最前是刻意的：版式按它的字宽标定，换成别的中文字体会跑版。
-补全走 `gitee.com` 上的 [harmonyos-fonts](https://gitee.com/IKKI2000/harmonyos-fonts)
-镜像，取回的字节必须通过**内容校验**（字节数 + sha256 + 可加载 + 含中文字形）才会
-落盘；校验不通过一律丢弃并退回系统字体。补全在进程内只尝试一次，不会每次搜歌都去
-撞网络；插件启动时会后台预热，让首次搜歌通常不必等。授权与校验值见 [LICENSES](LICENSES/README.md)。
+字体**不随插件分发**：两份共 16 MB，塞进仓库会把插件本身的更新包撑得又大又慢，
+所以只在需要时从 `gitee.com` 上的
+[harmonyos-fonts](https://gitee.com/IKKI2000/harmonyos-fonts) 镜像取回。取回的字节
+必须通过**内容校验**（字节数 + sha256 + 可加载 + 含中文字形）才会落盘，校验不通过
+一律丢弃。取回在进程内只尝试一次，不会每次搜歌都去撞网络；插件启动时会后台预热，
+让首次搜歌通常不必等。首次装好后需要联网一次（约 16 MB），超时上限见代码里的
+`FONT_WAIT_SECONDS`，超时或取不回来就先用 AstrBot 默认字体渲染，不影响搜歌。
+
+版式按 HarmonyOS Sans SC 的字宽标定，退到别的中文字体会跑版（行宽、折行位置都会
+变）——这是取不回字体时的既定代价，而不是故障。授权与校验值见 [LICENSES](LICENSES/README.md)。
 
 ## 已知限制与待验证项
 
@@ -114,6 +118,7 @@
 - **设备注册 dfid 未实现**：酷狗文档提示取播放地址前可能需要 `/register/dev` 注册设备。本插件使用 Cookie 中的 `dfid/mid`，缺失时生成并持久化本机随机标识；实测（见上）未注册设备也能取得 Hi-Res。若服务端要求「本次请求需要验证」，会明确报错（可重新扫码登录）。
 - **CDN 域名允许列表**：仅接受 `*.kugou.com`、`*.kglink.com`、`*.kgidc.cn`。若酷狗新 CDN 使用其他域名，下载会以「主机不在允许列表」明确报错，需要扩充 `file_cache.ALLOWED_HOST_SUFFIXES`。
 - **NapCat / CQHTTP 等实现差异**：文件上传 API 的可用性与文件大小限制取决于具体实现，以真实端到端验证为准。
+- **卡片字体不再随插件分发**（2026-11-14 起）：两份 HarmonyOS Sans SC 共 16 MB，留在仓库里会让插件本身的更新包大得容易拉不下来，所以改为首次使用时从 Gitee 镜像取回、按钉死的 `sha256`/`size` 校验后落盘。代价是**首次装好后要联网一次**；取不回来（离线、镜像挂了）就退回 AstrBot 默认字体，版式会跑但功能不受影响。镜像上那份字节与钉死值是否仍然一致，用 `CHECK_FONT_MIRROR=1 python -m pytest tests/test_font_store.py -q -k mirror` 核对。
 - **OneBot 上传结果的判定契约**（2026-11-14 修正）：aiocqhttp 的 `call_action` 走 `_handle_api_result`，只把信封里的 `data` 返回给调用方，`status == "failed"` 会直接抛 `ActionFailed`。`upload_*_file` 在 OneBot v11 里没有响应数据，`data` 常见是 `null` / `{}`（部分实现会附 `file_id` 等字段），所以「拿到返回值且无异常」就等于 OneBot 端已受理。旧实现按完整信封判定，会把成功也报成「文件上传失败：OneBot 返回结果缺少 status/retcode 字段」；现在只有信封明确失败才报错，并把 OneBot 自己的原因（如 `retcode=1200 群文件空间已满`）显示给用户。打开 `debug` 可在输出里看到 `upload_result` 记录的响应字段名，便于核对实现差异。
 
 ## 开发与测试
@@ -141,16 +146,15 @@ python -m pytest tests -q
 | `quality.py` | 档位词汇表与 `quality_priority` 解析 |
 | `search_card.py` | 搜歌结果卡片的本地 Pillow 渲染（不联网、不导入 astrbot）；字号阶梯是版式唯一真源 |
 | `cover_cache.py` | 封面的 SSRF 安全抓取与落盘缓存 |
-| `font_store.py` | 自带中文字体的补全：从固定镜像取回、按内容校验后落盘 |
-| `resources/fonts/` | 随插件分发的 HarmonyOS Sans SC（Regular + Bold）——卡片的中文字体来源 |
+| `font_store.py` | 卡片中文字体的取回：从固定镜像下载、按内容校验后落盘 |
 
 ## 许可与致谢
 
-项目主许可为 [MIT](LICENSE)。随包分发的中文字体保留各自的许可：
+项目主许可为 [MIT](LICENSE)。卡片中文字体**不从本仓库分发**，仅在使用时从镜像取回，其许可如下：
 
 | 资源 | 许可 | 用途 |
 | --- | --- | --- |
-| HarmonyOS Sans SC（[镜像仓库](https://gitee.com/IKKI2000/harmonyos-fonts)） | 仓库打包为 MIT，字体本体按华为公开条款免费使用（含商用，不得转售字体文件） | 搜歌卡片的默认中文字体，说明见 [LICENSES](LICENSES/README.md) |
+| HarmonyOS Sans SC（[镜像仓库](https://gitee.com/IKKI2000/harmonyos-fonts)） | 仓库打包为 MIT，字体本体按华为公开条款免费使用（含商用，不得转售字体文件） | 搜歌卡片的中文字体，按需从镜像取回，说明见 [LICENSES](LICENSES/README.md) |
 
 ## 版权提醒
 

@@ -49,10 +49,10 @@
     }
   },
   "font_auto_download": {
-    "description": "自动补全中文字体",
+    "description": "自动取回中文字体",
     "type": "bool",
     "default": true,
-    "hint": "搜歌卡片用插件自带的 HarmonyOS Sans SC 渲染。若随插件分发的字体文件缺失或损坏，开启时允许从固定镜像（gitee.com）取回并按内容校验后落盘，避免卡片悄悄换成观感不同的系统字体。内网/离线环境可关闭：此时卡片退回系统中文字体，不影响搜歌与下载。",
+    "hint": "搜歌卡片用 HarmonyOS Sans SC 渲染。字体不随插件分发（两份共 16 MB，会拖累插件更新），开启时允许从固定镜像（gitee.com）取回并按内容校验后落盘，首次装好后需要联网一次。内网/离线环境可关闭：此时卡片退回 AstrBot 默认字体（数据目录的 font.ttf，其次系统字体），版式会跑但搜歌与下载不受影响。",
     "obvious_hint": true
   },
   "timeout": {

@@ -202,6 +202,21 @@ def collect(agen) -> list:
     return asyncio.run(run())
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _cjk_fonts_for_rendering():
+    """渲染用例必须有中文字体，而仓库不再随包分发字体。
+
+    系统一个中文字体都没有时（瘦容器），把现场生成的最小中文字体追加进渲染层的
+    系统候选，让「画得出图」的断言照常运行；系统有中文字体时什么都不做。
+    """
+    import cjk_font
+    import search_card
+
+    candidates = cjk_font.rendering_font_candidates()
+    if candidates:
+        search_card.FONT_CANDIDATES = search_card.FONT_CANDIDATES + tuple(candidates)
+
+
 @pytest.fixture
 def plugin_factory(tmp_path, monkeypatch):
     """构造插件实例，数据目录指向临时目录。"""
@@ -210,7 +225,11 @@ def plugin_factory(tmp_path, monkeypatch):
     def make(config=None):
         data_dir = tmp_path / "data"
         monkeypatch.setattr(main, "plugin_data_dir", lambda: str(data_dir))
-        return main.KugouMusic(None, dict(config or {}))
+        # 默认不联网取字体：测试离线运行，不该去镜像拉 16 MB；要测取回路径的
+        # 用例自己传 font_auto_download=True。
+        settings = {"font_auto_download": False}
+        settings.update(config or {})
+        return main.KugouMusic(None, settings)
 
     return make
 
