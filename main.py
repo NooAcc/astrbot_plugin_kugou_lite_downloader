@@ -135,6 +135,12 @@ QR_LOGIN_TIMEOUT_SECONDS = 100       # 二维码消息发出后的硬截止：�
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_POLL_INTERVAL = 2.0
 FONT_WAIT_SECONDS = 20.0             # 首次渲染愿为「补全自带字体」等待的上限
+SEARCH_USAGE = (
+    "用法: /搜歌 <关键词> [序号]\n"
+    "  /搜歌 晴天      只搜索\n"
+    "  /搜歌 晴天 1    搜索并下载第 1 首\n"
+    "  /搜歌 1         下载上一次搜索结果的第 1 首"
+)
 
 
 def plugin_data_dir() -> str:
@@ -633,9 +639,9 @@ class KugouMusic(Star):
     # ── 登录指令 ─────────────────────────────────────────────────────────
 
     @filter.permission_type(PermissionType.ADMIN)
-    @filter.command("酷狗扫码登录")
+    @filter.command("酷狗登录")
     async def cmd_qr_login(self, event: AstrMessageEvent):
-        """扫码登录（酷狗概念版，安卓设备渠道）。"""
+        """扫码登录（酷狗概念版，安卓设备渠道）：/酷狗登录"""
         try:
             async for result in self._qr_login_flow(event):
                 yield result
@@ -742,7 +748,7 @@ class KugouMusic(Star):
                 if watchdog in done:
                     yield event.plain_result(
                         f"⏱ 二维码超时（{QR_LOGIN_TIMEOUT_SECONDS} 秒未登录），"
-                        "请重新发送 /酷狗扫码登录"
+                        "请重新发送 /酷狗登录"
                     )
                     return
                 try:
@@ -750,7 +756,7 @@ class KugouMusic(Star):
                 except Exception as exc:
                     logger.warning("[kugou] 扫码轮询异常：%s", type(exc).__name__)
                     yield event.plain_result(
-                        "❌ 登录失败：扫码状态查询出错，请重新发送 /酷狗扫码登录"
+                        "❌ 登录失败：扫码状态查询出错，请重新发送 /酷狗登录"
                     )
                     return
                 if kind == "final":
@@ -789,7 +795,7 @@ class KugouMusic(Star):
                 return "error", f"扫码已确认，但取凭据失败：{exc}"
             return "final", self._persist_login(result)
         if status == QR_EXPIRED:
-            return "error", "二维码已过期，请重新发送 /酷狗扫码登录"
+            return "error", "二维码已过期，请重新发送 /酷狗登录"
         return "retry", None
 
     @filter.permission_type(PermissionType.ADMIN)
@@ -827,7 +833,7 @@ class KugouMusic(Star):
         if not cookie:
             yield event.plain_result(
                 "❌ 未登录\n"
-                "发送 /酷狗扫码登录 用手机扫码登录\n"
+                "发送 /酷狗登录 用手机扫码登录\n"
                 "或在 WebUI 填写 kugou_cookie"
             )
             return
@@ -932,9 +938,9 @@ class KugouMusic(Star):
         for key in stale:
             self._search_cache.pop(key, None)
 
-    @filter.command("酷狗搜歌")
+    @filter.command("搜歌")
     async def cmd_search(self, event: AstrMessageEvent):
-        """搜索歌曲：/酷狗搜歌 <关键词>"""
+        """搜歌，或直接在搜索结果上下载：/搜歌 <关键词> [序号]"""
         try:
             async for result in self._search_flow(event):
                 yield result
@@ -942,9 +948,23 @@ class KugouMusic(Star):
             self._stop(event)
 
     async def _search_flow(self, event: AstrMessageEvent):
-        keyword = re.sub(r"^/?\s*酷狗\s*搜歌\s*", "", event.message_str.strip()).strip()
-        if not keyword:
-            yield event.plain_result("用法: /酷狗搜歌 <关键词>\n例如: /酷狗搜歌 晴天")
+        rest = re.sub(r"^/?\s*搜歌\s*", "", event.message_str.strip()).strip()
+        keyword, index = self._parse_search_args(rest)
+        if keyword is None and index is None:
+            yield event.plain_result(SEARCH_USAGE)
+            return
+
+        if keyword is None:
+            # 只给序号：沿用本会话上一次搜索的结果（原 /酷狗下载 的语义）
+            cached = self._cached_search(event)
+            if cached is None:
+                yield event.plain_result(
+                    f"[酷狗] 请先使用 /搜歌 <关键词> 搜索歌曲\n{SEARCH_USAGE}"
+                )
+                return
+            songs, keyword = cached
+            async for result in self._download_flow(event, songs, index, keyword):
+                yield result
             return
 
         # 只搜歌、从不下载的用户也必须有机会清理封面/卡片缓存（内部限频）
@@ -973,6 +993,12 @@ class KugouMusic(Star):
             "keyword": keyword,
         }
         self._save_search_cache()
+
+        if index is not None:
+            # 现搜现下：候选已经搜出来，不必再发一张卡片
+            async for result in self._download_flow(event, songs, index, keyword):
+                yield result
+            return
 
         card_path = await self._render_search_card(songs, keyword)
         if card_path is not None:
@@ -1029,52 +1055,62 @@ class KugouMusic(Star):
                 duration = f" [{minutes}:{seconds:02d}]"
             vip = " [VIP]" if song.get("pay_type") == 3 else ""
             lines.append(f"{index}. {song['songname']} - {song['singername']}{duration}{vip}")
-        lines.append("\n发送 /酷狗下载 序号 获取歌曲文件")
+        lines.append("\n发送 /搜歌 序号 获取歌曲文件")
         return "\n".join(lines)
 
-    # ── 下载指令 ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _parse_search_args(rest: str) -> tuple[str | None, int | None]:
+        """把 /搜歌 后面的参数拆成 (关键词, 序号)。
 
-    @filter.command("酷狗下载")
-    async def cmd_download(self, event: AstrMessageEvent):
-        """下载并发送歌曲文件：/酷狗下载 <序号>"""
-        async for result in self._download_flow(event):
-            yield result
+        末段是纯数字时按序号解析，前面的部分才是关键词；只有序号、没有关键词
+        时返回 (None, 序号)，由调用方决定是否回退到上一次搜索结果。其余情况
+        整串都当关键词，所以「搜歌 七里香」这类普通搜索不受影响。
 
-    @filter.command("酷狗点歌")
-    async def cmd_play(self, event: AstrMessageEvent):
-        """兼容入口，行为与 /酷狗下载 完全相同。"""
-        async for result in self._download_flow(event):
-            yield result
+        Returns:
+            (关键词, 序号)。两者都是 None 表示用户没给任何参数。
+        """
+        tokens = rest.split()
+        if not tokens:
+            return None, None
+        last = tokens[-1]
+        # 用 isdecimal 而不是 isdigit：上标「²」能过 isdigit，却会让 int() 抛错
+        if last.isdecimal():
+            return (" ".join(tokens[:-1]) or None), int(last)
+        return rest, None
 
-    async def _download_flow(self, event: AstrMessageEvent):
-        """两个入口共用的下载流程：校验 → 降级取文件 → 上传文件附件。"""
-        raw = re.sub(r"^/?\s*酷狗\s*(下载|点歌)\s*", "", event.message_str.strip()).strip()
+    def _cached_search(self, event) -> tuple[list, str] | None:
+        """取本会话还没过期、结构完好的搜索结果。
 
+        缺失、过期、条目损坏或结果为空一律返回 None，由调用方提示重新搜索。
+
+        Returns:
+            (歌曲列表, 当时的搜索关键词)，取不到时为 None。
+        """
         cached = self._search_cache.get(search_cache_key(event))
         if not isinstance(cached, dict) or cached.get("expire_at", 0) < time.time():
-            yield event.plain_result("[酷狗] 请先使用 /酷狗搜歌 <关键词> 搜索歌曲")
-            self._stop(event)
-            return
-
+            return None
         songs = cached.get("songs")
         if not isinstance(songs, list) or not songs:
-            yield event.plain_result("[酷狗] 请先使用 /酷狗搜歌 <关键词> 重新搜索歌曲")
-            self._stop(event)
-            return
-        try:
-            index = int(raw) - 1
-        except (TypeError, ValueError):
-            yield event.plain_result(
-                f"[酷狗] 请输入有效的序号\n例如: /酷狗下载 1  (范围 1-{len(songs)})"
-            )
-            self._stop(event)
-            return
-        if index < 0 or index >= len(songs):
+            return None
+        return songs, str(cached.get("keyword") or "")
+
+    # ── 下载流程（/搜歌 带序号时触发） ───────────────────────────────────
+
+    async def _download_flow(self, event: AstrMessageEvent, songs: list,
+                             index: int, keyword: str = ""):
+        """按序号取歌并上传文件附件。
+
+        songs 可以来自本次搜索，也可以来自会话缓存（`/搜歌 <序号>` 的老用法）。
+        """
+        if index < 1 or index > len(songs):
             yield event.plain_result(f"[酷狗] 序号超出范围，请输入 1-{len(songs)}")
+            if keyword:
+                # 现搜现下没有卡片，把候选列出来，用户不用再搜一次
+                yield event.plain_result(self._search_text_result(songs, keyword))
             self._stop(event)
             return
 
-        song = songs[index]
+        song = songs[index - 1]
         if not isinstance(song, dict):
             yield event.plain_result("[酷狗] 缓存的歌曲信息已损坏，请重新搜索")
             self._stop(event)

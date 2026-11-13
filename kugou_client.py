@@ -373,7 +373,7 @@ class KugouClient:
         """取该档位资源的播放地址列表（可能含多个备用 CDN）。"""
         if option.require_vip_type and self._credentials is None:
             raise ResourceUnavailable(
-                option.tier, "该音质需要登录酷狗账号，请让管理员先执行 /酷狗扫码登录"
+                option.tier, "该音质需要登录酷狗账号，请让管理员先执行 /酷狗登录"
             )
 
         hash_value = str(option.hash or song.get("hash") or "").lower()

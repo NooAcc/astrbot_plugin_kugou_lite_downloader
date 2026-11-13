@@ -350,7 +350,7 @@ def _render_sync(songs: Sequence[Any], keyword: str, output_dir: str,
 
     strips = [safe_text(s.get("songname"), 120) or "未知歌曲" for s in rows]
     covers = options.get("covers") or {}
-    command = safe_text(options.get("command") or "/酷狗下载", 20) or "/酷狗下载"
+    command = safe_text(options.get("command") or "/搜歌", 20) or "/搜歌"
 
     fonts = _Fonts(tuple(options.get("preferred_fonts") or ()),
                    preferred_bold=tuple(options.get("preferred_fonts_bold") or ()),
@@ -462,7 +462,7 @@ def _render_sync(songs: Sequence[Any], keyword: str, output_dir: str,
 
 
 async def render_search_card(songs, keyword: str, output_dir: str, *,
-                             covers: dict | None = None, command: str = "/酷狗下载",
+                             covers: dict | None = None, command: str = "/搜歌",
                              width: int | None = None,
                              preferred_fonts: Sequence[str] = (),
                              preferred_fonts_bold: Sequence[str] = (),

@@ -4,16 +4,16 @@ short_desc: 酷狗概念版搜歌，按音质优先级取原始音频并通过 O
 desc: |
   仅支持酷狗概念版（Lite）的歌曲文件发送插件，不依赖第三方解析/签名服务。
 
-  - 搜歌取文件：`/酷狗搜歌 <关键词>` 返回带封面的图片卡片（含序号、封面、歌名、歌手、专辑、时长），再 `/酷狗下载 <序号>` 获取歌曲文件（`/酷狗点歌 <序号>` 为兼容入口）
+  - 搜歌取文件：`/搜歌 <关键词>` 返回带封面的图片卡片（含序号、封面、歌名、歌手、专辑、时长），再 `/搜歌 <序号>` 获取歌曲文件；也可 `/搜歌 <关键词> <序号>` 一步搜索并下载
   - 卡片使用随插件分发的 HarmonyOS Sans SC 渲染，跨平台一致；字体缺失/损坏时可自动补全（`font_auto_download`）
   - 音质优先级：WebUI 配置 `quality_priority`，默认 Hi-Res → FLAC → 高品 320 → 标准 128，实测档位不达标会自动降级
   - 搜歌返回带封面的图片卡片；下载只发送音频文件附件，不发送音乐卡片、语音或播放直链
   - 缓存保留时长可配：`cache_ttl_hours`（默认 24 小时），统一控制音频文件、封面图片与卡片图
-  - 登录：`/酷狗扫码登录`，二维码图片直发聊天，完成后或 100 秒超时自动撤回；或 WebUI 手动填写 Cookie
+  - 登录：`/酷狗登录`，二维码图片直发聊天，完成后或 100 秒超时自动撤回；或 WebUI 手动填写 Cookie
   - 必须配置共享缓存目录（AstrBot 与 OneBot 端同一路径）；OneBot 实现需支持
     `upload_group_file` / `upload_private_file` 扩展接口
   - 需要 OneBot v11（aiocqhttp）平台
-version: 2.2.0
+version: 2.3.0
 author: xiaoyunsha
 repo: https://github.com/NooAcc/astrbot_plugin_kugou_music
 astrbot_version: ">=4.17.0"

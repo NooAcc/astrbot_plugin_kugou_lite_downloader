@@ -2,7 +2,7 @@
   "kugou_cookie": {
     "description": "酷狗概念版登录 Cookie",
     "type": "text",
-    "hint": "可留空：用 /酷狗扫码登录 获取，插件会自动保存。也可手动填写含 token、userid 的 cookie 字符串（不要填标准版账号的 Cookie）。",
+    "hint": "可留空：用 /酷狗登录 获取，插件会自动保存。也可手动填写含 token、userid 的 cookie 字符串（不要填标准版账号的 Cookie）。",
     "obvious_hint": true,
     "default": ""
   },
