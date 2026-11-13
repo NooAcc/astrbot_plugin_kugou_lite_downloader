@@ -138,8 +138,7 @@ FONT_WAIT_SECONDS = 20.0             # 首次渲染愿为「补全自带字体�
 SEARCH_USAGE = (
     "用法: /搜歌 <关键词> [序号]\n"
     "  /搜歌 晴天      只搜索\n"
-    "  /搜歌 晴天 1    搜索并下载第 1 首\n"
-    "  /搜歌 1         下载上一次搜索结果的第 1 首"
+    "  /搜歌 晴天 1    搜索并下载第 1 首"
 )
 
 
@@ -948,24 +947,24 @@ class KugouMusic(Star):
             self._stop(event)
 
     async def _search_flow(self, event: AstrMessageEvent):
+        """`/搜歌 <关键词>` 只搜索；补上序号则按这次搜索的候选下载第 N 首。
+
+        关键词必填：序号是后缀，不是独立的下载入口。
+        """
         rest = re.sub(r"^/?\s*搜歌\s*", "", event.message_str.strip()).strip()
         keyword, index = self._parse_search_args(rest)
-        if keyword is None and index is None:
+        if keyword is None:
             yield event.plain_result(SEARCH_USAGE)
             return
 
-        if keyword is None:
-            # 只给序号：沿用本会话上一次搜索的结果（原 /酷狗下载 的语义）
-            cached = self._cached_search(event)
-            if cached is None:
-                yield event.plain_result(
-                    f"[酷狗] 请先使用 /搜歌 <关键词> 搜索歌曲\n{SEARCH_USAGE}"
-                )
+        if index is not None:
+            # 刚搜过同一个关键词就直接下：用户按卡片上的编号点歌，下到的
+            # 必须还是卡片上那一首，而不是重新搜一遍后编号可能变动的结果
+            songs = self._cached_songs(event, keyword)
+            if songs is not None:
+                async for result in self._download_flow(event, songs, index, keyword):
+                    yield result
                 return
-            songs, keyword = cached
-            async for result in self._download_flow(event, songs, index, keyword):
-                yield result
-            return
 
         # 只搜歌、从不下载的用户也必须有机会清理封面/卡片缓存（内部限频）
         self._cleanup_cache()
@@ -1055,36 +1054,37 @@ class KugouMusic(Star):
                 duration = f" [{minutes}:{seconds:02d}]"
             vip = " [VIP]" if song.get("pay_type") == 3 else ""
             lines.append(f"{index}. {song['songname']} - {song['singername']}{duration}{vip}")
-        lines.append("\n发送 /搜歌 序号 获取歌曲文件")
+        lines.append("\n发送 /搜歌 <关键词> <序号> 获取歌曲文件")
         return "\n".join(lines)
 
     @staticmethod
     def _parse_search_args(rest: str) -> tuple[str | None, int | None]:
         """把 /搜歌 后面的参数拆成 (关键词, 序号)。
 
-        末段是纯数字时按序号解析，前面的部分才是关键词；只有序号、没有关键词
-        时返回 (None, 序号)，由调用方决定是否回退到上一次搜索结果。其余情况
-        整串都当关键词，所以「搜歌 七里香」这类普通搜索不受影响。
+        关键词必填，序号只能作为后缀：末段是纯数字、且前面还有词时才算序号。
+        所以「搜歌 3」是搜歌名为「3」的歌，不是「下载第 3 首」；「搜歌 七里香」
+        这类普通搜索也不受影响。
 
         Returns:
-            (关键词, 序号)。两者都是 None 表示用户没给任何参数。
+            (关键词, 序号)。关键词为 None 表示用户根本没给参数。
         """
         tokens = rest.split()
         if not tokens:
             return None, None
         last = tokens[-1]
         # 用 isdecimal 而不是 isdigit：上标「²」能过 isdigit，却会让 int() 抛错
-        if last.isdecimal():
-            return (" ".join(tokens[:-1]) or None), int(last)
+        if len(tokens) > 1 and last.isdecimal():
+            return " ".join(tokens[:-1]), int(last)
         return rest, None
 
-    def _cached_search(self, event) -> tuple[list, str] | None:
-        """取本会话还没过期、结构完好的搜索结果。
+    def _cached_songs(self, event, keyword: str) -> list | None:
+        """取「本会话 + 同一个关键词」还没过期的搜索结果。
 
-        缺失、过期、条目损坏或结果为空一律返回 None，由调用方提示重新搜索。
+        关键词对不上就不复用：否则序号会落到另一组候选上，下到的歌和用户
+        看到的那张卡片对不上。
 
         Returns:
-            (歌曲列表, 当时的搜索关键词)，取不到时为 None。
+            歌曲列表；缺失、过期、损坏或关键词不同一律返回 None。
         """
         cached = self._search_cache.get(search_cache_key(event))
         if not isinstance(cached, dict) or cached.get("expire_at", 0) < time.time():
@@ -1092,7 +1092,9 @@ class KugouMusic(Star):
         songs = cached.get("songs")
         if not isinstance(songs, list) or not songs:
             return None
-        return songs, str(cached.get("keyword") or "")
+        if str(cached.get("keyword") or "") != keyword:
+            return None
+        return songs
 
     # ── 下载流程（/搜歌 带序号时触发） ───────────────────────────────────
 

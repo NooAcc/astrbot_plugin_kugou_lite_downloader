@@ -841,12 +841,12 @@ def test_parse_search_args_rules():
 
     assert parse("") == (None, None)                     # 什么都没给
     assert parse("晴天") == ("晴天", None)                # 只搜索
-    assert parse("晴天 1") == ("晴天", 1)                 # 现搜现下
+    assert parse("晴天 1") == ("晴天", 1)                 # 搜索 + 下载
     assert parse("七里香 2004 2") == ("七里香 2004", 2)   # 只吃末段
-    assert parse("1") == (None, 1)                       # 只有序号 → 走缓存
+    assert parse("1") == ("1", None)                     # 关键词必填：这是在搜歌名「1」
     assert parse("晴天 abc") == ("晴天 abc", None)        # 非数字不当序号
     assert parse("²") == ("²", None)                      # isdigit 为真、int() 会炸的字符
-    assert parse("３") == (None, 3)                       # 全角数字照常当序号
+    assert parse("３") == ("３", None)                    # 单独一个全角数字也只是关键词
 
 
 def test_search_no_longer_registers_legacy_commands():
@@ -942,7 +942,7 @@ def test_download_uploads_group_file_and_stops_propagation(
     _install_ladder(plugin, monkeypatch, ladder)
 
     bot = FakeBot()
-    event = FakeEvent("搜歌 1", group_id="1000", sender_id="42", bot=bot)
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=bot)
     _seed_cache(plugin, event)
 
     collect(plugin.cmd_search(event))
@@ -964,7 +964,7 @@ def test_download_uploads_private_file_in_private_chat(
     _install_ladder(plugin, monkeypatch, _StubLadder(outcome=outcome))
 
     bot = FakeBot()
-    event = FakeEvent("搜歌 1", group_id=None, sender_id="42", bot=bot)
+    event = FakeEvent("搜歌 晴天 1", group_id=None, sender_id="42", bot=bot)
     _seed_cache(plugin, event)
 
     collect(plugin.cmd_search(event))
@@ -1002,21 +1002,24 @@ def test_search_with_keyword_and_index_downloads_in_one_shot(
     assert event.stopped is True
 
 
-def test_search_with_index_only_reuses_previous_results(
+def test_search_with_index_reuses_matching_cached_search(
     plugin_factory, monkeypatch, tmp_path
 ):
-    """`/搜歌 <序号>` 沿用上次搜索结果：不重新触网搜索（原 /酷狗下载 的语义）。"""
+    """刚搜过同一个关键词：带序号时直接下，不重新触网搜索。
+
+    这样用户按卡片上的编号点歌，下到的还是卡片上那一首。
+    """
     plugin = plugin_factory()
     outcome = _outcome(str(tmp_path / "a.flac"))
     _install_ladder(plugin, monkeypatch, _StubLadder(outcome=outcome))
 
     async def boom(keyword):
-        raise AssertionError("只给序号时不该重新搜索")
+        raise AssertionError("同关键词的搜索还在缓存里，不该重新搜")
 
     monkeypatch.setattr(plugin, "_search_songs", boom)
 
     bot = FakeBot()
-    event = FakeEvent("搜歌 1", group_id="1000", sender_id="42", bot=bot)
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=bot)
     _seed_cache(plugin, event)
 
     collect(plugin.cmd_search(event))
@@ -1025,28 +1028,66 @@ def test_search_with_index_only_reuses_previous_results(
     assert event.stopped is True
 
 
-def test_download_requires_prior_search_for_this_user(plugin_factory, monkeypatch):
+def test_search_with_index_and_different_keyword_searches_fresh(
+    plugin_factory, monkeypatch, tmp_path
+):
+    """关键词换了就不能复用旧候选：序号必须落在这次搜出来的列表上。"""
     plugin = plugin_factory()
-    _install_ladder(plugin, monkeypatch, _StubLadder(outcome=_outcome("p")))
+    outcome = _outcome(str(tmp_path / "a.flac"))
+    ladder = _StubLadder(outcome=outcome)
+    _install_ladder(plugin, monkeypatch, ladder)
 
-    event = FakeEvent("搜歌 1", group_id="1000", sender_id="42", bot=FakeBot())
+    searched = []
+
+    async def search(keyword):
+        searched.append(keyword)
+        return [dict(_SONG, songname="阴天")]
+
+    monkeypatch.setattr(plugin, "_search_songs", search)
+
+    bot = FakeBot()
+    event = FakeEvent("搜歌 阴天 1", group_id="1000", sender_id="42", bot=bot)
+    _seed_cache(plugin, event)          # 缓存里是「晴天」的候选
 
     collect(plugin.cmd_search(event))
 
-    assert "请先" in event.text
-    assert event.bot.api.calls == []
+    assert searched == ["阴天"]
+    assert ladder.ran == [dict(_SONG, songname="阴天")]
+    assert bot.api.calls[0][0] == "upload_group_file"
+
+
+def test_numeric_keyword_is_a_search_not_a_download(plugin_factory, monkeypatch):
+    """关键词必填：`搜歌 3` 是搜歌名为「3」的歌，不是下载第 3 首。"""
+    plugin = plugin_factory()
+    monkeypatch.setattr(plugin, "_render_search_card", _stub_card(plugin))
+    searched = []
+
+    async def search(keyword):
+        searched.append(keyword)
+        return [dict(_SONG)]
+
+    monkeypatch.setattr(plugin, "_search_songs", search)
+
+    bot = FakeBot()
+    event = FakeEvent("搜歌 3", group_id="1000", sender_id="42", bot=bot)
+    _seed_cache(plugin, event)          # 缓存里有「晴天」的候选也不该被用上
+
+    collect(plugin.cmd_search(event))
+
+    assert searched == ["3"]
+    assert bot.api.calls == []
 
 
 def test_search_rejects_out_of_range_index_and_lists_candidates(plugin_factory, monkeypatch):
     plugin = plugin_factory()
     _install_ladder(plugin, monkeypatch, _StubLadder(outcome=_outcome("p")))
 
-    out_of_range = FakeEvent("搜歌 9", group_id="1000", sender_id="42", bot=FakeBot())
+    out_of_range = FakeEvent("搜歌 晴天 9", group_id="1000", sender_id="42", bot=FakeBot())
     _seed_cache(plugin, out_of_range)
     collect(plugin.cmd_search(out_of_range))
 
     assert "范围" in out_of_range.text
-    assert "晴天" in out_of_range.text      # 现搜现下没有卡片，顺带列候选
+    assert "晴天" in out_of_range.text      # 带序号时没有卡片，顺带列候选
     assert out_of_range.bot.api.calls == []
     assert out_of_range.stopped is True
 
@@ -1073,7 +1114,7 @@ def test_download_reports_missing_shared_dir_without_network(plugin_factory):
     plugin = plugin_factory({"shared_cache_dir": ""})
     plugin._session = FakeSession([])
 
-    event = FakeEvent("搜歌 1", group_id="1000", sender_id="42", bot=FakeBot())
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=FakeBot())
     _seed_cache(plugin, event)
 
     collect(plugin.cmd_search(event))
@@ -1087,7 +1128,7 @@ def test_download_reports_invalid_quality_priority(plugin_factory, shared_dir):
     plugin = plugin_factory({"shared_cache_dir": shared_dir, "quality_priority": ["bogus"]})
     plugin._session = FakeSession([])
 
-    event = FakeEvent("搜歌 1", group_id="1000", sender_id="42", bot=FakeBot())
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=FakeBot())
     _seed_cache(plugin, event)
 
     collect(plugin.cmd_search(event))
@@ -1101,7 +1142,7 @@ def test_download_reports_all_qualities_failed_with_reasons(plugin_factory, monk
     error = AllQualitiesFailed([("hires", "需要会员才能获取"), ("flac", "上游无此音质")])
     _install_ladder(plugin, monkeypatch, _StubLadder(error=error))
 
-    event = FakeEvent("搜歌 1", group_id="1000", sender_id="42", bot=FakeBot())
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=FakeBot())
     _seed_cache(plugin, event)
 
     collect(plugin.cmd_search(event))
@@ -1118,7 +1159,7 @@ def test_upload_exception_is_reported_without_card_fallback(plugin_factory, monk
     _install_ladder(plugin, monkeypatch, _StubLadder(outcome=outcome))
 
     bot = FakeBot(error=RuntimeError("ACTION_FAILED"))
-    event = FakeEvent("搜歌 1", group_id="1000", sender_id="42", bot=bot)
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=bot)
     _seed_cache(plugin, event)
 
     collect(plugin.cmd_search(event))
@@ -1135,7 +1176,7 @@ def test_upload_unsupported_action_reports_clear_error(plugin_factory, monkeypat
     _install_ladder(plugin, monkeypatch, _StubLadder(outcome=_outcome(str(tmp_path / "a.flac"))))
 
     bot = FakeBot(error=KeyError("upload_group_file"))
-    event = FakeEvent("搜歌 1", group_id="1000", sender_id="42", bot=bot)
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=bot)
     _seed_cache(plugin, event)
 
     collect(plugin.cmd_search(event))
@@ -1149,7 +1190,7 @@ def test_upload_retcode_failure_is_reported(plugin_factory, monkeypatch, tmp_pat
     _install_ladder(plugin, monkeypatch, _StubLadder(outcome=_outcome(str(tmp_path / "a.flac"))))
 
     bot = FakeBot(responses=[{"status": "failed", "retcode": 1200, "msg": "file too large"}])
-    event = FakeEvent("搜歌 1", group_id="1000", sender_id="42", bot=bot)
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=bot)
     _seed_cache(plugin, event)
 
     collect(plugin.cmd_search(event))
@@ -1165,7 +1206,7 @@ def test_download_releases_hold_even_on_upload_failure(plugin_factory, monkeypat
     _install_ladder(plugin, monkeypatch, ladder)
 
     bot = FakeBot(error=RuntimeError("boom"))
-    event = FakeEvent("搜歌 1", group_id="1000", sender_id="42", bot=bot)
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=bot)
     _seed_cache(plugin, event)
 
     collect(plugin.cmd_search(event))
@@ -1181,7 +1222,7 @@ def test_download_does_not_retry_other_quality_after_upload_failure(
     _install_ladder(plugin, monkeypatch, ladder)
 
     bot = FakeBot(error=RuntimeError("boom"))
-    event = FakeEvent("搜歌 1", group_id="1000", sender_id="42", bot=bot)
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=bot)
     _seed_cache(plugin, event)
 
     collect(plugin.cmd_search(event))
@@ -1250,40 +1291,36 @@ def test_prune_search_cache_survives_non_dict_entries(plugin_factory):
     assert set(plugin._search_cache) == {"new"}
 
 
-def test_index_only_survives_corrupt_cache_entry(plugin_factory):
+@pytest.mark.parametrize(
+    "cached",
+    [
+        "corrupt",                                            # 整条不是 dict
+        {"songs": "oops", "expire_at": time.time() + 60},      # songs 不是列表
+        {"songs": [], "expire_at": time.time() + 60},          # 空列表
+        {"songs": [dict(_SONG)], "expire_at": time.time() - 1},  # 已过期
+        {"songs": [dict(_SONG)], "expire_at": time.time() + 60,
+         "keyword": "阴天"},                                   # 关键词对不上
+    ],
+    ids=["not-a-dict", "songs-not-list", "empty-songs", "expired", "other-keyword"],
+)
+def test_unusable_cache_entry_falls_back_to_fresh_search(
+    plugin_factory, monkeypatch, tmp_path, cached
+):
+    """缓存坏了、过期了或关键词对不上：重新搜一遍再下，不能直接失败。"""
     plugin = plugin_factory()
-    event = FakeEvent("搜歌 1")
-    plugin._search_cache[search_cache_key(event)] = "corrupt"
+    outcome = _outcome(str(tmp_path / "a.flac"))
+    ladder = _StubLadder(outcome=outcome)
+    _install_ladder(plugin, monkeypatch, ladder)
+    monkeypatch.setattr(plugin, "_search_songs", _fixed_search([dict(_SONG)]))
+
+    bot = FakeBot()
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=bot)
+    plugin._search_cache[search_cache_key(event)] = cached
 
     collect(plugin.cmd_search(event))
 
-    assert "请先使用" in event.text
-    assert event.stopped is True
-
-
-def test_index_only_survives_non_list_songs(plugin_factory):
-    plugin = plugin_factory()
-    event = FakeEvent("搜歌 1")
-    plugin._search_cache[search_cache_key(event)] = {
-        "songs": "oops", "expire_at": time.time() + 60,
-    }
-
-    collect(plugin.cmd_search(event))
-
-    assert "请先使用" in event.text
-    assert event.stopped is True
-
-
-def test_index_only_survives_expired_cache(plugin_factory):
-    plugin = plugin_factory()
-    event = FakeEvent("搜歌 1")
-    plugin._search_cache[search_cache_key(event)] = {
-        "songs": [dict(_SONG)], "expire_at": time.time() - 1,
-    }
-
-    collect(plugin.cmd_search(event))
-
-    assert "请先使用" in event.text
+    assert ladder.ran == [dict(_SONG)]
+    assert bot.api.calls[0][0] == "upload_group_file"
     assert event.stopped is True
 
 
@@ -1304,7 +1341,7 @@ def test_download_reports_verification_evidence_in_debug(
     )
     _install_ladder(plugin, monkeypatch, _StubLadder(outcome=outcome))
 
-    event = FakeEvent("搜歌 1", group_id="1000", sender_id="42", bot=FakeBot())
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=FakeBot())
     _seed_cache(plugin, event)
 
     collect(plugin.cmd_search(event))

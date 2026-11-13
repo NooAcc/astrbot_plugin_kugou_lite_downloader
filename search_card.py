@@ -452,7 +452,7 @@ def _render_sync(songs: Sequence[Any], keyword: str, output_dir: str,
     draw.rectangle((0, footer_top, width, total_h), fill=FOOTER_BG)
     draw.line((0, footer_top, width, footer_top), fill=LINE, width=1)
     draw.text((PAD, footer_top + round(FOOTER_H * 0.3)),
-              f"发送 {command} 序号 获取歌曲文件", font=f_foot, fill=MUTED)
+              f"发送 {command} <关键词> <序号> 获取歌曲文件", font=f_foot, fill=MUTED)
 
     os.makedirs(output_dir, exist_ok=True)
     name = f"search_card_{time.strftime('%Y%m%d%H%M%S')}_{random.randbytes(4).hex()}.png"
