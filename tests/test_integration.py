@@ -48,7 +48,7 @@ class _Client:
 
 
 def _wire(tmp_path, responses):
-    cache = CacheManager(str(tmp_path / "shared" / "astrbot_plugin_kugou_music"))
+    cache = CacheManager(str(tmp_path / "shared" / "astrbot_plugin_kugou_lite_downloader"))
     cache.ensure_ready()
     session = FakeSession(responses)
     downloader = Downloader(
@@ -103,7 +103,7 @@ def test_ladder_reuses_cache_on_a_later_run(tmp_path):
 
 def test_ladder_reports_missing_shared_dir_before_anything_else(tmp_path):
     # 目录不可用时必须在接触网络之前就失败（配置问题不得伪装成音质不可用）
-    cache = CacheManager(str(tmp_path / "unowned" / "astrbot_plugin_kugou_music"))
+    cache = CacheManager(str(tmp_path / "unowned" / "astrbot_plugin_kugou_lite_downloader"))
     cache.root and os.makedirs(cache.root, exist_ok=True)      # 存在但没有 manifest
     session = FakeSession([FakeResponse([flac_head()])])
     fetcher = AudioFetcher(

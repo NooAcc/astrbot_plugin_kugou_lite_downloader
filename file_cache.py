@@ -409,7 +409,7 @@ def _mib(value: int) -> str:
 # ── 缓存目录归属与生命周期 ───────────────────────────────────────────────
 
 MANIFEST_NAME = "manifest.json"
-MANIFEST = {"plugin": "astrbot_plugin_kugou_music", "version": 1}
+MANIFEST = {"plugin": "astrbot_plugin_kugou_lite_downloader", "version": 1}
 CACHE_DIRNAME = "cache"
 TMP_DIRNAME = "tmp"
 _TMP_TTL_SECONDS = 300

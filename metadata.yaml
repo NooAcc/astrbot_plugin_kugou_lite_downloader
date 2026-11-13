@@ -1,4 +1,4 @@
-name: astrbot_plugin_kugou_music
+name: astrbot_plugin_kugou_lite_downloader
 display_name: 酷狗歌曲文件发送
 short_desc: 酷狗概念版搜歌，按音质优先级取原始音频并通过 OneBot 发送歌曲文件
 desc: |
@@ -13,9 +13,9 @@ desc: |
   - 必须配置共享缓存目录（AstrBot 与 OneBot 端同一路径）；OneBot 实现需支持
     `upload_group_file` / `upload_private_file` 扩展接口
   - 需要 OneBot v11（aiocqhttp）平台
-version: 2.4.0
+version: 2.5.0
 author: NooAcc
-repo: https://github.com/NooAcc/astrbot_plugin_kugou_music
+repo: https://github.com/NooAcc/astrbot_plugin_kugou_lite_downloader
 astrbot_version: ">=4.17.0"
 support_platforms:
   - aiocqhttp

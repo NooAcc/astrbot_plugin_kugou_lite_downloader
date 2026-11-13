@@ -55,7 +55,7 @@ def test_parse_shared_dir_validation(tmp_path):
 
     root, err = parse_shared_dir(str(tmp_path))
     assert err == ""
-    assert root == os.path.join(str(tmp_path), "astrbot_plugin_kugou_music")
+    assert root == os.path.join(str(tmp_path), "astrbot_plugin_kugou_lite_downloader")
 
 
 def test_ladder_requires_configured_shared_dir(plugin_factory):
@@ -78,7 +78,7 @@ def test_ladder_requires_valid_quality_priority(plugin_factory, shared_dir):
 
 
 def test_ladder_requires_owned_shared_dir(plugin_factory, tmp_path):
-    foreign = tmp_path / "foreign" / "astrbot_plugin_kugou_music"
+    foreign = tmp_path / "foreign" / "astrbot_plugin_kugou_lite_downloader"
     foreign.mkdir(parents=True)
     (foreign / "user-file.mp3").write_bytes(b"x")
     plugin = plugin_factory({"shared_cache_dir": str(foreign.parent)})
@@ -714,7 +714,7 @@ def test_initialize_prepares_shared_dir(plugin_factory, shared_dir):
     asyncio.run(plugin.initialize())
 
     assert os.path.isfile(
-        os.path.join(shared_dir, "astrbot_plugin_kugou_music", "manifest.json")
+        os.path.join(shared_dir, "astrbot_plugin_kugou_lite_downloader", "manifest.json")
     )
 
 

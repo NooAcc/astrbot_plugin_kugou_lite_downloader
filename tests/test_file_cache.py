@@ -327,7 +327,7 @@ def test_unsafe_initial_url_aborts_without_trying_alternates(tmp_path):
 
 
 def _make_cache(tmp_path) -> CacheManager:
-    cache = CacheManager(str(tmp_path / "astrbot_plugin_kugou_music"))
+    cache = CacheManager(str(tmp_path / "astrbot_plugin_kugou_lite_downloader"))
     cache.ensure_ready()
     return cache
 
@@ -352,7 +352,7 @@ def test_ensure_ready_creates_dir_and_manifest(tmp_path):
 
 
 def test_ensure_ready_refuses_unowned_existing_dir(tmp_path):
-    root = tmp_path / "astrbot_plugin_kugou_music"
+    root = tmp_path / "astrbot_plugin_kugou_lite_downloader"
     root.mkdir()
     (root / "someone-elses.mp3").write_bytes(b"x")
     with pytest.raises(SharedDirError) as err:
@@ -451,7 +451,7 @@ def test_ensure_ready_rejects_linked_cache_subdir(tmp_path):
 
     否则 cleanup 会把链接目标（插件目录之外）的内容当成自己的缓存删掉。
     """
-    root = tmp_path / "astrbot_plugin_kugou_music"
+    root = tmp_path / "astrbot_plugin_kugou_lite_downloader"
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "victim").mkdir()
@@ -459,7 +459,7 @@ def test_ensure_ready_rejects_linked_cache_subdir(tmp_path):
 
     root.mkdir()
     (root / "manifest.json").write_text(
-        '{"plugin": "astrbot_plugin_kugou_music", "version": 1}', encoding="utf-8"
+        '{"plugin": "astrbot_plugin_kugou_lite_downloader", "version": 1}', encoding="utf-8"
     )
     (root / "tmp").mkdir()
     if not _make_dir_link(outside, root / "cache"):

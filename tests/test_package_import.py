@@ -59,7 +59,7 @@ def _install_astrbot_stub():
 def test_import_as_astrbot_package(tmp_path, monkeypatch):
     """以 data.plugins.<dir>.main 导入时不应依赖插件目录在 sys.path 上。"""
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    package_name = "astrbot_plugin_kugou_music"
+    package_name = "astrbot_plugin_kugou_lite_downloader"
     plugin_dir = tmp_path / "data" / "plugins" / package_name
     plugin_dir.mkdir(parents=True)
 

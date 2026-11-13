@@ -1,4 +1,4 @@
-# astrbot_plugin_kugou_music
+# astrbot_plugin_kugou_lite_downloader
 
 酷狗**概念版（Lite）**歌曲文件发送插件：搜歌返回带封面的图片卡片 → 按音质优先级获取原始音频 → 通过 OneBot 群/私聊文件接口发送**文件附件**。
 
@@ -20,7 +20,7 @@
 
 本项目基于 [xiaoyunsha/astrbot_plugin_kugou_music](https://github.com/xiaoyunsha/astrbot_plugin_kugou_music) 重构。
 
-在 AstrBot WebUI 中通过仓库地址 `https://github.com/NooAcc/astrbot_plugin_kugou_music` 安装，或下载本仓库 zip 后手动上传。
+在 AstrBot WebUI 中通过仓库地址 `https://github.com/NooAcc/astrbot_plugin_kugou_lite_downloader` 安装，或下载本仓库 zip 后手动上传。
 
 运行期依赖（`requirements.txt`，安装时自动处理）：
 
@@ -34,7 +34,7 @@
    - 私聊：`upload_private_file(user_id, file, name)`
 
    并非所有 OneBot v11 实现都提供这两个 API。不支持时插件会明确报错，不会退化为卡片或链接。
-3. **共享缓存目录**：在 WebUI 填写 `shared_cache_dir` 绝对路径，且 **AstrBot 与 OneBot 实现端必须能以同一路径访问**（同一台机器，或 Docker 挂载到相同路径）。插件只使用该目录下自己的子目录 `astrbot_plugin_kugou_music/`。
+3. **共享缓存目录**：在 WebUI 填写 `shared_cache_dir` 绝对路径，且 **AstrBot 与 OneBot 实现端必须能以同一路径访问**（同一台机器，或 Docker 挂载到相同路径）。插件只使用该目录下自己的子目录 `astrbot_plugin_kugou_lite_downloader/`。
 4. **登录**：管理员执行 `/酷狗登录`（也可在 WebUI 填写概念版 Cookie）。插件共享同一个酷狗账号。登录二维码会直接作为图片发到聊天里，消息发出 **100 秒**内未登录会自动结束任务并撤回二维码；登录成功、过期或失败时同样立即撤回。撤回依赖 OneBot `delete_msg`，若协议端不支持，二维码会留在聊天里，但不影响登录。
 
 ## 指令

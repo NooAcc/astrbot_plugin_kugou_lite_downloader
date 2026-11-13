@@ -108,7 +108,7 @@ except ImportError:  # 以顶层模块方式导入（离线测试）
     from quality import ConfigError, parse_quality_priority
     from search_card import CardRenderError, render_search_card
 
-PLUGIN_DIRNAME = "astrbot_plugin_kugou_music"
+PLUGIN_DIRNAME = "astrbot_plugin_kugou_lite_downloader"
 
 SEARCH_TTL_SECONDS = 300
 #: 缓存保留时长的默认值（小时）；实际值来自配置项 `cache_ttl_hours`。
