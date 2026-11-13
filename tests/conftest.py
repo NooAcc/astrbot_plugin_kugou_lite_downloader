@@ -71,6 +71,31 @@ def _install_astrbot_stub():
     event_filter.PermissionType = PermissionType
     event.filter = filter_stub
 
+    message_components = types.ModuleType("astrbot.api.message_components")
+
+    class _Segment:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+            if args and isinstance(args[0], str):
+                self.text = args[0]
+
+    class Plain(_Segment):
+        pass
+
+    class Image(_Segment):
+        @classmethod
+        def fromFileSystem(cls, path):
+            return cls(file=path)
+
+        @classmethod
+        def fromBase64(cls, data):
+            return cls(file=f"base64://{data}")
+
+    message_components.Plain = Plain
+    message_components.Image = Image
+
     star = types.ModuleType("astrbot.api.star")
 
     class Context:
@@ -88,6 +113,7 @@ def _install_astrbot_stub():
         "astrbot.api": api,
         "astrbot.api.event": event,
         "astrbot.api.event.filter": event_filter,
+        "astrbot.api.message_components": message_components,
         "astrbot.api.star": star,
     })
 
@@ -112,7 +138,7 @@ class FakeBotApi:
             raise self.error
         if self.responses:
             return self.responses.pop(0)
-        return {"status": "ok", "retcode": 0, "data": {"message_id": 1}}
+        return {"message_id": 1}      # aiocqhttp call_action 返回已拆包的 data
 
 
 class FakeBot:
@@ -148,8 +174,12 @@ class FakeEvent:
         return ("plain", text)
 
     def chain_result(self, chain):
+        text = "\n".join(
+            getattr(seg, "text", "") for seg in chain
+            if isinstance(getattr(seg, "text", None), str)
+        )
         self.results.append(("chain", chain))
-        return ("chain", chain)
+        return ("chain", text)
 
     def stop_event(self):
         self.stopped = True

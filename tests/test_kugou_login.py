@@ -49,6 +49,51 @@ def test_qr_start_uses_lite_android_channel():
     assert call["kw"]["headers"]["User-Agent"] == "ua"
     assert qr.key == "KEY123"
     assert "qrcode=KEY123" in qr.scan_url
+    assert qr.image_b64 == ""          # 非 data URI 的假值不应被当作图片
+
+
+def test_qr_start_exposes_real_png_data_uri_as_image_bytes():
+    png_b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4"
+        "//8/AwAI/AL+p5qgoAAAAABJRU5ErkJggg=="
+    )
+    login, _ = _login([json_response({
+        "data": {"qrcode": "KEY123", "qrcode_img": f"data:image/png;base64,{png_b64}"}
+    })])
+
+    qr = asyncio.run(login.qr_start())
+
+    assert qr.image_b64 == png_b64
+    assert qr.image.startswith(b"\x89PNG\r\n\x1a\n")
+    assert len(qr.image) == 70
+
+
+def test_qr_start_treats_invalid_qr_image_as_missing():
+    login, _ = _login([json_response({
+        "data": {"qrcode": "KEY123", "qrcode_img": "data:image/png;base64,not-base64!!"}
+    })])
+
+    qr = asyncio.run(login.qr_start())
+
+    assert qr.image_b64 == ""
+    assert qr.image == b""
+
+
+def test_qr_start_ignores_oversized_qr_image():
+    payload_b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4"
+        "//8/AwAI/AL+p5qgoAAAAABJRU5ErkJggg=="
+    )[:-4]                    # 去掉末尾填充，便于继续拼接合法 base64
+    big = payload_b64 + "A" * (64 * 1024)   # 合法 base64，但超过 64 KiB 上限
+    login, _ = _login([json_response({
+        "data": {"qrcode": "KEY123",
+                 "qrcode_img": f"data:image/png;base64,{big}"}
+    })])
+
+    qr = asyncio.run(login.qr_start())
+
+    assert qr.image_b64 == ""
+    assert qr.image == b""
 
 
 def test_qr_start_raises_when_kugou_returns_no_key():

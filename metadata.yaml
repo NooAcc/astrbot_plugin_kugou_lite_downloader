@@ -7,7 +7,7 @@ desc: |
   - 搜歌取文件：`/酷狗搜歌 <关键词>` → `/酷狗下载 <序号>`（`/酷狗点歌 <序号>` 为兼容入口）
   - 音质优先级：WebUI 配置 `quality_priority`，默认 Hi-Res → FLAC → 高品 320 → 标准 128，实测档位不达标会自动降级
   - 只发送音频文件附件：不发送音乐卡片、语音、封面图片或播放直链
-  - 登录：`/酷狗扫码登录`，或 WebUI 手动填写 Cookie
+  - 登录：`/酷狗扫码登录`，二维码图片直发聊天，完成后或 100 秒超时自动撤回；或 WebUI 手动填写 Cookie
   - 必须配置共享缓存目录（AstrBot 与 OneBot 端同一路径）；OneBot 实现需支持
     `upload_group_file` / `upload_private_file` 扩展接口
   - 需要 OneBot v11（aiocqhttp）平台

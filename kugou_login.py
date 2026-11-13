@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import time
@@ -40,6 +42,7 @@ DEFAULT_UA = "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi"
 
 QR_URL = "https://login-user.kugou.com/v2/qrcode"
 QR_CHECK_URL = "https://login-user.kugou.com/v2/get_userinfo_qrcode"
+MAX_QR_IMAGE_B64 = 64 * 1024     # 二维码 PNG 通常 1~3 KB；防止异常大 payload 撑爆消息
 
 # 扫码登录轮询状态：-1 瞬时错误（可重试）、0 已过期、1 待扫、2 已扫、4 已确认
 QR_TRANSIENT = -1
@@ -60,6 +63,8 @@ class LoginError(Exception):
 class QrSession:
     key: str
     scan_url: str
+    image_b64: str = ""     # 酷狗返回的二维码 PNG 的 base64（不含 data URI 前缀）
+    image: bytes = b""      # 校验过的 PNG 原始字节，供离线校验/调试
 
 
 @dataclass(frozen=True)
@@ -152,7 +157,13 @@ class LiteLogin:
                 "生成登录二维码失败：酷狗没有返回二维码"
                 "（可能接口临时不可用，或设备指纹被风控）"
             )
-        return QrSession(key=key, scan_url=f"{SCAN_PAGE}?qrcode={key}")
+        image_b64, image = _qr_image((inner or {}).get("qrcode_img"))
+        return QrSession(
+            key=key,
+            scan_url=f"{SCAN_PAGE}?qrcode={key}",
+            image_b64=image_b64,
+            image=image,
+        )
 
     async def qr_check(self, key: str) -> int:
         """返回轮询状态；网络异常返回 `QR_TRANSIENT`，不会中断轮询。"""
@@ -217,6 +228,24 @@ class LiteLogin:
             raise
         except Exception as exc:
             raise LoginError(f"请求失败：{type(exc).__name__}") from exc
+
+
+def _qr_image(raw) -> tuple[str, bytes]:
+    """解析酷狗 `data:image/png;base64,...`；无效或非 PNG 数据当作没有图片。"""
+    text = raw if isinstance(raw, str) else ""
+    prefix = "data:image/png;base64,"
+    if not text.startswith(prefix):
+        return "", b""
+    encoded = text[len(prefix):].strip()
+    if not encoded or len(encoded) > MAX_QR_IMAGE_B64:
+        return "", b""
+    try:
+        image = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        return "", b""
+    if not image.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "", b""
+    return encoded, image
 
 
 def _parse_json(text: str) -> dict:

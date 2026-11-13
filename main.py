@@ -54,6 +54,7 @@ try:
         LiteLogin,
         LoginError,
         LoginResult,
+        QrSession,
         build_cookie,
         cookie_source_label,
         extract_cookie_field,
@@ -89,6 +90,7 @@ except ImportError:  # 以顶层模块方式导入（离线测试）
         LiteLogin,
         LoginError,
         LoginResult,
+        QrSession,
         build_cookie,
         cookie_source_label,
         extract_cookie_field,
@@ -104,7 +106,7 @@ CLEANUP_INTERVAL_SECONDS = 600        # 运行期有界清理的最小间隔
 DOWNLOAD_TIMEOUT_SECONDS = 180.0
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
 MAX_CONCURRENT_DOWNLOADS = 2
-QR_TTL_SECONDS = 300
+QR_LOGIN_TIMEOUT_SECONDS = 100       # 二维码消息发出后的硬截止：保证可撤回
 DEFAULT_TIMEOUT_SECONDS = 15.0
 DEFAULT_POLL_INTERVAL = 2.0
 
@@ -144,6 +146,51 @@ def build_upload_request(is_group: bool, target_id, file_path: str,
     if is_group:
         return "upload_group_file", {"group_id": numeric, "file": file_path, "name": name}
     return "upload_private_file", {"user_id": numeric, "file": file_path, "name": name}
+
+
+def extract_message_id(response):
+    """从 OneBot 发送结果里取 message_id。
+
+    aiocqhttp 的 `call_action` 走 `_handle_api_result`，返回的是**已拆包**的
+    `data` 字段（如 `{"message_id": 123}`）；部分实现/旧测试桩可能返回完整
+    信封 `{"status":"ok","retcode":0,"data":{"message_id":123}}`，两种都兼容。
+    """
+    if not isinstance(response, dict):
+        return None
+    candidate = response.get("message_id")
+    if candidate is None and isinstance(response.get("data"), dict):
+        candidate = response["data"].get("message_id")
+    if candidate is None or isinstance(candidate, bool):
+        return None
+    try:
+        return int(str(candidate).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def build_qr_message(image_b64: str, timeout_seconds: int, scan_url: str = "") -> list:
+    """构造 OneBot 原生消息段：文字说明 + 酷狗二维码 PNG（base64）。
+
+    没有图片时退回登录页文字链接，保证登录流程仍可用。
+    """
+    if image_b64:
+        text = (
+            "📱 请用手机酷狗 App 扫下方二维码登录（概念版安卓渠道）\n"
+            f"⏱ {timeout_seconds} 秒内未登录将自动结束并撤回二维码\n"
+            "✅ 扫码后请在手机上点「确认登录」"
+        )
+    else:
+        text = (
+            "⚠️ 酷狗未返回二维码图片，请在手机浏览器打开以下链接扫码\n"
+            f"⏱ {timeout_seconds} 秒内未登录将自动结束并撤回本消息\n"
+            "（登录请求为酷狗概念版协议，设备显示为安卓手机）\n\n"
+            f"👉 {scan_url}\n\n"
+            "打开后页面会显示二维码，用手机酷狗 App 扫一扫即可"
+        )
+    message = [{"type": "text", "data": {"text": text}}]
+    if image_b64:
+        message.append({"type": "image", "data": {"file": f"base64://{image_b64}"}})
+    return message
 
 
 def check_upload_result(response) -> tuple[bool, str]:
@@ -451,47 +498,154 @@ class KugouMusic(Star):
             self._stop(event)
 
     async def _qr_login_flow(self, event: AstrMessageEvent):
-        login = self._make_login(await self._get_session())
         yield event.plain_result("⏳ 正在生成二维码（酷狗概念版 · 安卓设备渠道）...")
-
+        login = self._make_login(await self._get_session())
         try:
             qr = await login.qr_start()
         except LoginError as exc:
             yield event.plain_result(f"❌ {exc}")
             return
 
-        yield event.plain_result(
-            "📱 请在手机浏览器打开以下链接，然后用手机酷狗 App 扫码\n\n"
-            f"（登录请求为酷狗概念版协议，设备显示为安卓手机）\n"
-            f"⏱ 二维码有效期 5 分钟\n\n"
-            f"👉 {qr.scan_url}"
+        api = getattr(getattr(event, "bot", None), "api", None)
+        sent, message_id = False, None
+        if api is not None:
+            sent, message_id = await self._send_raw_qr(event, api, qr)
+        if not sent:
+            async for result in self._qr_via_chain_result(event, qr):
+                yield result
+
+        try:
+            async for result in self._poll_qr_login(event, login, qr):
+                yield result
+        finally:
+            if message_id is not None:
+                await self._recall_qr(api, message_id)
+
+    async def _send_raw_qr(self, event, api, qr: QrSession) -> tuple[bool, int | None]:
+        """走 OneBot 原生接口发二维码，返回 (是否发出, message_id)。
+
+        只有「调用失败」才需要上层改用 chain_result 兜底；调用成功但拿不到
+        message_id 时二维码已经发出，绝不能重发第二张。
+        """
+        message = build_qr_message(
+            qr.image_b64, QR_LOGIN_TIMEOUT_SECONDS, scan_url=qr.scan_url
         )
+        try:
+            if event.get_group_id():
+                resp = await api.call_action(
+                    "send_group_msg", group_id=int(event.get_group_id()),
+                    message=message,
+                )
+            else:
+                resp = await api.call_action(
+                    "send_private_msg", user_id=int(event.get_sender_id()),
+                    message=message,
+                )
+        except Exception as exc:
+            logger.debug("[kugou] 直发二维码失败：%s", type(exc).__name__)
+            return False, None
+        return True, extract_message_id(resp)
 
-        deadline = time.time() + QR_TTL_SECONDS
-        last_state = 0
-        while time.time() < deadline and not self._closing:
-            await asyncio.sleep(self._poll_interval)
-            status = await login.qr_check(qr.key)
-            if status in (QR_TRANSIENT, QR_WAITING):
-                continue
-            if status == QR_SCANNED and last_state != QR_SCANNED:
-                yield event.plain_result("✅ 已扫码，请在手机上点「确认登录」")
-                last_state = QR_SCANNED
-            elif status == QR_CONFIRMED:
-                try:
-                    result = await login.qr_credentials(qr.key)
-                except LoginError as exc:
-                    yield event.plain_result(f"⚠️ {exc}")
-                    return
-                yield event.plain_result(self._persist_login(result))
-                return
-            elif status == QR_EXPIRED:
-                yield event.plain_result("❌ 二维码已过期，请重新发送 /酷狗扫码登录")
-                return
-
-        if self._closing:
+    async def _qr_via_chain_result(self, event, qr: QrSession):
+        """没有原生 OneBot API 时仍显示图片（此路径无法撤回）。"""
+        try:
+            from astrbot.api.message_components import Image, Plain
+        except ImportError:
+            yield event.plain_result(
+                "❌ 当前平台无法发送二维码图片，请在 WebUI 手动填写 Cookie"
+            )
             return
-        yield event.plain_result("⏱ 二维码超时（5 分钟未扫码），请重新发送 /酷狗扫码登录")
+        if qr.image_b64:
+            chain = [
+                Plain("📱 请用手机酷狗 App 扫下方二维码登录（概念版安卓渠道）"),
+                Image(file=f"base64://{qr.image_b64}"),
+            ]
+        else:
+            chain = [Plain(f"📱 请打开链接扫码：{qr.scan_url}")]
+        yield event.chain_result(chain)
+
+    async def _recall_qr(self, api, message_id) -> None:
+        """撤回二维码消息；失败只记日志，不打断登录结果。"""
+        try:
+            await api.call_action("delete_msg", message_id=message_id)
+            logger.debug("[kugou] 已撤回登录二维码消息")
+        except Exception as exc:
+            logger.debug("[kugou] 撤回登录二维码失败：%s", type(exc).__name__)
+
+    async def _poll_qr_login(self, event, login, qr: QrSession):
+        """轮询扫码状态；二维码消息发出 100 秒后强制结束，保证能撤回。
+
+        watchdog 用单调时钟，且是唯一的超时判定者：墙钟调整/休眠恢复不会让
+        轮询静默结束而不给用户超时提示。
+        """
+        started = asyncio.get_running_loop().time()
+        deadline = started + QR_LOGIN_TIMEOUT_SECONDS
+
+        async def stop_at_deadline():
+            await asyncio.sleep(max(0.0, deadline - asyncio.get_running_loop().time()))
+            return "timeout"
+
+        watchdog = asyncio.create_task(stop_at_deadline())
+        poll_task = None
+        last_state = None
+        try:
+            while True:
+                poll_task = asyncio.create_task(self._qr_poll_once(login, qr))
+                done, _ = await asyncio.wait(
+                    {watchdog, poll_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if watchdog in done:
+                    yield event.plain_result(
+                        f"⏱ 二维码超时（{QR_LOGIN_TIMEOUT_SECONDS} 秒未登录），"
+                        "请重新发送 /酷狗扫码登录"
+                    )
+                    return
+                try:
+                    kind, payload = poll_task.result()
+                except Exception as exc:
+                    logger.warning("[kugou] 扫码轮询异常：%s", type(exc).__name__)
+                    yield event.plain_result(
+                        "❌ 登录失败：扫码状态查询出错，请重新发送 /酷狗扫码登录"
+                    )
+                    return
+                if kind == "final":
+                    yield event.plain_result(payload)
+                    return
+                if kind == "done":
+                    return
+                if kind == "error":
+                    yield event.plain_result(f"❌ {payload}")
+                    return
+                elif kind == "scanned" and last_state != QR_SCANNED:
+                    yield event.plain_result("✅ 已扫码，请在手机上点「确认登录」")
+                    last_state = QR_SCANNED
+        finally:
+            watchdog.cancel()
+            tasks = [watchdog]
+            if poll_task is not None and not poll_task.done():
+                poll_task.cancel()
+                tasks.append(poll_task)
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _qr_poll_once(self, login, qr: QrSession):
+        """一次轮询迭代；返回 (类型, 内容)，供外层决定是否继续。"""
+        await asyncio.sleep(self._poll_interval)
+        if self._closing:
+            return "done", None
+        status = await login.qr_check(qr.key)
+        if status in (QR_TRANSIENT, QR_WAITING):
+            return "retry", None
+        if status == QR_SCANNED:
+            return "scanned", None
+        if status == QR_CONFIRMED:
+            try:
+                result = await login.qr_credentials(qr.key)
+            except LoginError as exc:
+                return "error", f"扫码已确认，但取凭据失败：{exc}"
+            return "final", self._persist_login(result)
+        if status == QR_EXPIRED:
+            return "error", "二维码已过期，请重新发送 /酷狗扫码登录"
+        return "retry", None
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("酷狗退出登录")

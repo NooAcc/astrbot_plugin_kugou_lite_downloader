@@ -11,14 +11,36 @@ from file_cache import SharedDirError
 from kugou_client import AllQualitiesFailed, DownloadOutcome, KugouApiError
 from kugou_login import LoginResult
 from main import (
+    QR_LOGIN_TIMEOUT_SECONDS,
+    build_qr_message,
     build_upload_request,
     check_upload_result,
+    extract_message_id,
     parse_shared_dir,
     search_cache_key,
 )
 from quality import ConfigError
 
 _LITE_COOKIE = "token=SECRETTOKEN123456; userid=777; a_id=3116"
+_QR_PNG = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4"
+    "//8/AwAI/AL+p5qgoAAAAABJRU5ErkJggg=="
+)
+
+
+def _qr_payload(key="KEY1", image=True):
+    data = {"qrcode": key}
+    if image:
+        data["qrcode_img"] = f"data:image/png;base64,{_QR_PNG}"
+    return json_response({"data": data})
+
+
+def _qr_actions(bot):
+    return [action for action, _ in bot.api.calls]
+
+
+def _qr_login_event(bot=None):
+    return FakeEvent(group_id="1000", sender_id="42", bot=bot or FakeBot())
 
 
 # ── 配置解析 ─────────────────────────────────────────────────────────────
@@ -195,24 +217,314 @@ def test_persist_login_reports_success(plugin_factory):
 # ── 扫码登录指令 ─────────────────────────────────────────────────────────
 
 
-def test_qr_login_polls_and_saves_credentials(plugin_factory):
+def test_message_id_accepts_real_aiocqhttp_flat_data():
+    # aiocqhttp 的 _handle_api_result 返回已拆包的 data，不是完整信封
+    assert extract_message_id({"message_id": 123456}) == 123456
+    assert extract_message_id({"message_id": "123456"}) == 123456
+    assert extract_message_id({"data": {"message_id": 7}}) == 7
+    assert extract_message_id({"status": "ok", "retcode": 0}) is None
+    assert extract_message_id({"message_id": True}) is None
+    assert extract_message_id({"message_id": "abc"}) is None
+    assert extract_message_id(None) is None
+
+
+def test_qr_message_contains_text_and_real_png_image():
+    message = build_qr_message(_QR_PNG, QR_LOGIN_TIMEOUT_SECONDS)
+
+    assert message[0]["type"] == "text"
+    assert "100 秒" in message[0]["data"]["text"]
+    assert "https://" not in message[0]["data"]["text"]   # 不再发二维码链接
+    assert len(message) == 2
+    assert message[1] == {"type": "image", "data": {"file": f"base64://{_QR_PNG}"}}
+
+
+def test_qr_message_omits_image_when_kugou_returns_none():
+    message = build_qr_message("", QR_LOGIN_TIMEOUT_SECONDS, "https://h5.kugou.com/?qrcode=KEY1")
+
+    assert len(message) == 1
+    assert message[0]["type"] == "text"
+    assert "qrcode=KEY1" in message[0]["data"]["text"]
+    assert "{scan_url}" not in message[0]["data"]["text"]
+
+
+def test_qr_login_sends_image_via_raw_onebot_and_recalls_on_success(plugin_factory):
     plugin = plugin_factory()
     plugin._poll_interval = 0
     plugin._session = FakeSession([
-        json_response({"data": {"qrcode": "KEY1", "qrcode_img": "b64"}}),
+        _qr_payload(),
+        json_response({"data": {"status": 4}}),
+        json_response({"data": {"token": "TK", "userid": 555}}),
+    ])
+    bot = FakeBot()
+    event = _qr_login_event(bot)
+
+    collect(plugin.cmd_qr_login(event))
+
+    assert _qr_actions(bot) == ["send_group_msg", "delete_msg"]
+    message = bot.api.calls[0][1]["message"]
+    assert message[1] == {"type": "image", "data": {"file": f"base64://{_QR_PNG}"}}
+    assert bot.api.calls[1][1] == {"message_id": 1}
+    assert "555" in event.text
+    assert "qrcode=KEY1" not in event.text
+    assert plugin._load_saved_cookie()["cookie"] == "token=TK; userid=555; a_id=3116"
+
+
+def test_qr_login_recalls_with_real_aiocqhttp_flat_response(plugin_factory):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._session = FakeSession([
+        _qr_payload(),
+        json_response({"data": {"status": 4}}),
+        json_response({"data": {"token": "TK", "userid": 555}}),
+    ])
+    bot = FakeBot(responses=[{"message_id": 987654}])   # 真实 aiocqhttp 形状
+    event = _qr_login_event(bot)
+
+    collect(plugin.cmd_qr_login(event))
+
+    assert _qr_actions(bot) == ["send_group_msg", "delete_msg"]
+    assert bot.api.calls[1][1] == {"message_id": 987654}
+    chains = [payload for kind, payload in event.results if kind == "chain"]
+    assert chains == []                                  # 不能重复发第二张二维码
+    assert "555" in event.text
+
+
+def test_qr_login_successful_send_without_message_id_does_not_resend(plugin_factory):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._session = FakeSession([
+        _qr_payload(),
+        json_response({"data": {"status": 4}}),
+        json_response({"data": {"token": "TK", "userid": 555}}),
+    ])
+    bot = FakeBot(responses=[{}])   # 直发成功，但实现端没给 message_id
+    event = _qr_login_event(bot)
+
+    collect(plugin.cmd_qr_login(event))
+
+    assert _qr_actions(bot) == ["send_group_msg"]       # 不重发、也不撤回
+    chains = [payload for kind, payload in event.results if kind == "chain"]
+    assert chains == []
+    assert "555" in event.text
+
+
+def test_qr_login_recalls_on_every_terminal_state(plugin_factory):
+    cases = [
+        ([json_response({"data": {"status": 0}})], "过期"),
+        ([json_response({"data": {"status": 4}})], "取凭据失败"),  # 取凭据失败
+        ([json_response({"data": {"status": 4}}),
+          json_response({"data": {"token": "TK", "userid": 1}})], "成功"),
+    ]
+    for responses, expected in cases:
+        plugin = plugin_factory()
+        plugin._poll_interval = 0
+        plugin._session = FakeSession([_qr_payload(), *responses])
+        bot = FakeBot()
+        event = _qr_login_event(bot)
+
+        collect(plugin.cmd_qr_login(event))
+
+        assert _qr_actions(bot) == ["send_group_msg", "delete_msg"]
+        assert expected in event.text
+
+
+def test_qr_login_recalls_qr_when_100_seconds_pass_without_login(
+    plugin_factory, monkeypatch
+):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._session = FakeSession([_qr_payload()])   # 之后状态查询会返回 HTTP 500
+    bot = FakeBot()
+    event = _qr_login_event(bot)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(main.time, "time", lambda: clock["now"])
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay):
+        clock["now"] += min(delay, QR_LOGIN_TIMEOUT_SECONDS + 1)
+        await real_sleep(0)
+
+    monkeypatch.setattr(main.asyncio, "sleep", fast_sleep)
+
+    collect(plugin.cmd_qr_login(event))
+
+    assert clock["now"] >= 1000.0 + QR_LOGIN_TIMEOUT_SECONDS
+    assert _qr_actions(bot) == ["send_group_msg", "delete_msg"]
+    assert "超时" in event.text
+    assert "100 秒" in event.text
+    assert plugin._load_saved_cookie() is None
+
+
+def test_qr_login_timeout_budget_is_100_seconds():
+    assert QR_LOGIN_TIMEOUT_SECONDS == 100
+
+
+def test_qr_login_timeout_uses_monotonic_clock_not_wall_clock(
+    plugin_factory, monkeypatch
+):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._session = FakeSession([
+        _qr_payload(),
+        json_response({"data": {"status": 4}}),
+        json_response({"data": {"token": "TK", "userid": 555}}),
+    ])
+    bot = FakeBot()
+    event = _qr_login_event(bot)
+    wall = {"now": 1000.0}
+    monkeypatch.setattr(main.time, "time", lambda: wall["now"])
+
+    collect(plugin.cmd_qr_login(event))
+
+    # 墙钟被人为调后（模拟 NTP 回拨），登录成功不应被误判为超时
+    assert "成功" in event.text
+    assert "超时" not in event.text
+    assert _qr_actions(bot) == ["send_group_msg", "delete_msg"]
+
+
+def test_qr_login_recalls_on_plugin_shutdown(plugin_factory):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._closing = True
+    plugin._session = FakeSession([_qr_payload()])
+    bot = FakeBot()
+    event = _qr_login_event(bot)
+
+    collect(plugin.cmd_qr_login(event))
+
+    assert _qr_actions(bot) == ["send_group_msg", "delete_msg"]
+
+
+def test_qr_login_falls_back_to_chain_result_when_send_fails(plugin_factory):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._session = FakeSession([
+        _qr_payload(),
+        json_response({"data": {"status": 4}}),
+        json_response({"data": {"token": "TK", "userid": 555}}),
+    ])
+    bot = FakeBot()
+    event = _qr_login_event(bot)
+    original = bot.api.call_action
+
+    async def fail_only_send(action, **params):
+        if action in ("send_group_msg", "send_private_msg"):
+            raise RuntimeError("SEND_FAILED")
+        return await original(action, **params)
+
+    bot.api.call_action = fail_only_send
+
+    collect(plugin.cmd_qr_login(event))
+
+    chains = [payload for kind, payload in event.results if kind == "chain"]
+    assert len(chains) == 1
+    assert chains[0][-1].file == f"base64://{_QR_PNG}"
+    assert "delete_msg" not in _qr_actions(bot)
+    assert "555" in event.text
+
+
+def test_qr_login_falls_back_to_chain_result_without_onebot_api(plugin_factory):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._session = FakeSession([
+        _qr_payload(),
+        json_response({"data": {"status": 4}}),
+        json_response({"data": {"token": "TK", "userid": 555}}),
+    ])
+    event = _qr_login_event(bot=None)
+    event.bot = None
+
+    collect(plugin.cmd_qr_login(event))
+
+    chains = [payload for kind, payload in event.results if kind == "chain"]
+    assert len(chains) == 1
+    assert chains[0][-1].file == f"base64://{_QR_PNG}"
+    assert "555" in event.text
+
+
+def test_qr_login_falls_back_to_link_when_no_qr_image(plugin_factory):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._session = FakeSession([
+        _qr_payload(image=False),
+        json_response({"data": {"status": 4}}),
+        json_response({"data": {"token": "TK", "userid": 555}}),
+    ])
+    bot = FakeBot()
+    event = _qr_login_event(bot)
+
+    collect(plugin.cmd_qr_login(event))
+
+    assert _qr_actions(bot) == ["send_group_msg", "delete_msg"]
+    message = bot.api.calls[0][1]["message"]
+    assert len(message) == 1
+    assert "qrcode=KEY1" in message[0]["data"]["text"]
+    assert "555" in event.text
+
+
+def test_qr_login_uses_private_msg_in_private_chat(plugin_factory):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._session = FakeSession([
+        _qr_payload(),
+        json_response({"data": {"status": 4}}),
+        json_response({"data": {"token": "TK", "userid": 555}}),
+    ])
+    bot = FakeBot()
+    event = FakeEvent(sender_id="42", bot=bot)
+
+    collect(plugin.cmd_qr_login(event))
+
+    assert _qr_actions(bot) == ["send_private_msg", "delete_msg"]
+    assert bot.api.calls[0][1]["user_id"] == 42
+
+
+def test_qr_login_recalls_even_when_delete_msg_fails(plugin_factory):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._session = FakeSession([
+        _qr_payload(),
+        json_response({"data": {"status": 4}}),
+        json_response({"data": {"token": "TK", "userid": 555}}),
+    ])
+    bot = FakeBot()
+    event = _qr_login_event(bot)
+    recorded = []
+    original = bot.api.call_action
+
+    async def fail_recall(action, **params):
+        recorded.append((action, params))
+        if action == "delete_msg":
+            raise RuntimeError("RECALL_FAILED")
+        return await original(action, **params)
+
+    bot.api.call_action = fail_recall
+    collect(plugin.cmd_qr_login(event))
+
+    assert [action for action, _ in recorded] == ["send_group_msg", "delete_msg"]
+    assert "555" in event.text       # 撤回失败不影响登录结果
+    assert "撤回" not in event.text  # 也不打扰聊天
+
+
+def test_qr_login_scanned_then_confirmed(plugin_factory):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._session = FakeSession([
+        _qr_payload(),
         json_response({"data": {"status": 1}}),
         json_response({"data": {"status": 2}}),
         json_response({"data": {"status": 4}}),
         json_response({"data": {"token": "TK", "userid": 555}}),
     ])
+    bot = FakeBot()
+    event = _qr_login_event(bot)
 
-    event = FakeEvent()
     collect(plugin.cmd_qr_login(event))
 
-    assert "qrcode=KEY1" in event.text
     assert "确认登录" in event.text
     assert "555" in event.text
-    assert plugin._load_saved_cookie()["cookie"] == "token=TK; userid=555; a_id=3116"
+    assert _qr_actions(bot) == ["send_group_msg", "delete_msg"]
 
 
 def test_qr_login_reports_generation_failure(plugin_factory):
@@ -220,37 +532,124 @@ def test_qr_login_reports_generation_failure(plugin_factory):
     plugin._poll_interval = 0
     plugin._session = FakeSession([json_response({"data": {}})])
 
-    event = FakeEvent()
+    event = _qr_login_event()
     collect(plugin.cmd_qr_login(event))
 
     assert "❌" in event.text
 
 
-def test_qr_login_reports_expired_qr(plugin_factory):
+def test_qr_login_reports_unexpected_poll_error_without_leaking_details(plugin_factory):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._session = FakeSession([_qr_payload()])
+    bot = FakeBot()
+    event = _qr_login_event(bot)
+
+    async def explode(_key):
+        raise RuntimeError("SECRET_INTERNAL_DETAIL")
+
+    real_make_login = plugin._make_login
+
+    def patched_make_login(session):
+        login = real_make_login(session)
+        login.qr_check = explode
+        return login
+
+    plugin._make_login = patched_make_login
+    collect(plugin.cmd_qr_login(event))
+
+    assert "登录失败" in event.text
+    assert "SECRET_INTERNAL_DETAIL" not in event.text
+    assert _qr_actions(bot) == ["send_group_msg", "delete_msg"]
+
+
+def test_qr_login_cancels_hanging_poll_and_recalls(plugin_factory, monkeypatch):
+    plugin = plugin_factory()
+    plugin._poll_interval = 0
+    plugin._session = FakeSession([_qr_payload()])
+    bot = FakeBot()
+    event = _qr_login_event(bot)
+
+    async def explode(_key):
+        raise RuntimeError("SECRET_INTERNAL_DETAIL")
+
+    real_make_login = plugin._make_login
+
+    def patched_make_login(session):
+        login = real_make_login(session)
+        login.qr_check = explode
+        return login
+
+    plugin._make_login = patched_make_login
+    collect(plugin.cmd_qr_login(event))
+
+    assert "登录失败" in event.text
+    assert "SECRET_INTERNAL_DETAIL" not in event.text
+    assert _qr_actions(bot) == ["send_group_msg", "delete_msg"]
+
+
+def test_qr_login_cancels_hanging_poll_and_recalls(plugin_factory, monkeypatch):
+    plugin = plugin_factory()
+    plugin._session = FakeSession([_qr_payload()])
+    bot = FakeBot()
+    event = _qr_login_event(bot)
+    monkeypatch.setattr(plugin, "_poll_interval", 0)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(main.time, "time", lambda: clock["now"])
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay):
+        clock["now"] += min(delay, QR_LOGIN_TIMEOUT_SECONDS + 1)
+        await real_sleep(0)
+
+    monkeypatch.setattr(main.asyncio, "sleep", fast_sleep)
+
+    async def hang(_key):
+        await asyncio.Event().wait()
+
+    real_make_login = plugin._make_login
+
+    def patched_make_login(session):
+        login = real_make_login(session)
+        login.qr_check = hang
+        return login
+
+    plugin._make_login = patched_make_login
+
+    collect(plugin.cmd_qr_login(event))
+
+    assert "超时" in event.text
+    assert _qr_actions(bot) == ["send_group_msg", "delete_msg"]
+
+
+def test_qr_login_generator_close_recalls_qr(plugin_factory):
     plugin = plugin_factory()
     plugin._poll_interval = 0
     plugin._session = FakeSession([
-        json_response({"data": {"qrcode": "KEY1"}}),
-        json_response({"data": {"status": 0}}),
+        _qr_payload(), json_response({"data": {"status": 1}}),
     ])
+    bot = FakeBot()
+    event = _qr_login_event(bot)
 
-    event = FakeEvent()
-    collect(plugin.cmd_qr_login(event))
+    async def run():
+        gen = plugin.cmd_qr_login(event)
+        # 二维码发出后，在超时 watchdog 结束前关闭生成器
+        while True:
+            task = asyncio.create_task(gen.__anext__())
+            done, _ = await asyncio.wait({task}, timeout=0.05)
+            if not done:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                break
+            try:
+                task.result()
+            except StopAsyncIteration:
+                break
+        await gen.aclose()
 
-    assert "过期" in event.text
+    asyncio.run(asyncio.wait_for(run(), 5))
 
-
-def test_qr_login_aborts_when_shutting_down(plugin_factory):
-    plugin = plugin_factory()
-    plugin._poll_interval = 0
-    plugin._closing = True
-    plugin._session = FakeSession([json_response({"data": {"qrcode": "KEY1"}})])
-
-    event = FakeEvent()
-    collect(plugin.cmd_qr_login(event))
-
-    assert "qrcode=KEY1" in event.text
-    assert "成功" not in event.text
+    assert _qr_actions(bot) == ["send_group_msg", "delete_msg"]
 
 
 # ── 调试输出与生命周期 ───────────────────────────────────────────────────
@@ -737,9 +1136,9 @@ def test_login_commands_stop_event_propagation(plugin_factory):
     plugin = plugin_factory()
     plugin._poll_interval = 0
     plugin._closing = True
-    plugin._session = FakeSession([json_response({"data": {"qrcode": "K"}})])
+    plugin._session = FakeSession([_qr_payload()])
 
-    qr_event = FakeEvent()
+    qr_event = _qr_login_event()
     collect(plugin.cmd_qr_login(qr_event))
     assert qr_event.stopped is True
 
