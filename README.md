@@ -149,6 +149,10 @@ python -m pytest tests -q
 | `cover_cache.py` | 封面的 SSRF 安全抓取与落盘缓存 |
 | `font_store.py` | 卡片中文字体的取回：从固定镜像下载、按内容校验后落盘 |
 
+## 更新日志
+
+各版本的变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 许可与致谢
 
 项目主许可为 [MIT](LICENSE)。卡片中文字体**不从本仓库分发**，仅在使用时从镜像取回，其许可如下：
