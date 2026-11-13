@@ -14,12 +14,11 @@ desc: |
     `upload_group_file` / `upload_private_file` 扩展接口
   - 需要 OneBot v11（aiocqhttp）平台
 version: 2.4.0
-author: xiaoyunsha
+author: NooAcc
 repo: https://github.com/NooAcc/astrbot_plugin_kugou_music
 astrbot_version: ">=4.17.0"
 support_platforms:
   - aiocqhttp
-social_link: https://github.com/xiaoyunsha
 category: 娱乐
 tags:
   - 音乐
