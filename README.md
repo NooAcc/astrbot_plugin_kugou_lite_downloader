@@ -1,77 +1,122 @@
 # astrbot_plugin_kugou_music
 
-纯酷狗音乐点歌插件，不依赖第三方 API 中转服务。支持搜索、点歌、VIP 直取、扫码 / 微信登录、原生 QQ 音乐卡片。
+酷狗**概念版（Lite）**歌曲文件发送插件：搜歌 → 按音质优先级获取原始音频 → 通过 OneBot 群/私聊文件接口发送**文件附件**。
+
+不依赖第三方解析或签名服务，不发送音乐卡片、语音、封面图片或播放直链。
 
 ## 特性
 
-- **搜索 + 点歌**：`/酷狗搜歌 <关键词>` 列出结果，再 `/酷狗点歌 <序号>` 发送
-- **三种登录方式**
-  - `/酷狗扫码登录`：通用，PC 端 / 安卓端二维码轮询，纯插件内置
-  - `/酷狗微信登录`：仅概念版（安卓渠道），授权链接 1 分 50 秒后自动撤回防盗用
-  - WebUI 手动填写 Cookie（含 token / userid / vip_token）
-- **VIP 歌曲**：配置 Cookie 后走 `trackercdn.kugou.com/v5/url` 取 VIP 直链
-- **音乐卡片**：按以下优先级发送
-  1. OIAPI 签名卡片（免费，无需 token；概念版自动走 `kugoulite` 格式）
-  2. 咸鱼 API 签名卡片（需在 WebUI 填 `music_card_key`）
-  3. NapCat 原生 `music.type=custom` 段兜底（秒发，不超时）
-- **双协议切换**：WebUI 开关一键在标准版（appid=1005）与酷狗概念版 Lite（appid=3116）之间切换
-- **本地图片服务**：插件内置 127.0.0.1 静态服务器，给二维码 / 封面提供 http URL
+- **搜歌取文件**：`/酷狗搜歌 <关键词>` 列出编号，再 `/酷狗下载 <序号>` 获取歌曲文件
+- **音质优先级**：WebUI 配置 `quality_priority`，默认 `Hi-Res → FLAC → 高品 320 → 标准 128`
+  - 逐档位尝试；某档位无资源、无权限或格式不可用时自动降级
+  - 下载后按音频头实测规格判定档位，达标才发送；实测档位高于请求档位也算达标
+  - 只处理配置里列出的档位，不会偷偷请求你没选的档位
+- **不转码**：原始音频原样发送，不改写标签；扩展名以实际音频格式为准
+- **文件名**：`歌手 - 歌名 [实际音质].扩展名`，例如 `周杰伦 - 晴天 [FLAC].flac`
+- **登录**：`/酷狗扫码登录`、`/酷狗微信登录`，或 WebUI 手动填写 Cookie（概念版账号）
 
 ## 安装
 
-在 AstrBot WebUI → 插件市场搜索「酷狗音乐点歌」安装，或从本仓库发布页下载 zip 后手动上传。
+本项目基于 [xiaoyunsha/astrbot_plugin_kugou_music](https://github.com/xiaoyunsha/astrbot_plugin_kugou_music) 重构。
 
-依赖会自动通过 `requirements.txt` 安装：
+在 AstrBot WebUI 中通过仓库地址 `https://github.com/NooAcc/astrbot_plugin_kugou_music` 安装，或下载本仓库 zip 后手动上传。
+
+运行期依赖（`requirements.txt`，安装时自动处理）：
 
 - `aiohttp>=3.8.0`
-- `pycryptodome`（用于微信登录的 RSA / AES 加解密）
+- `pycryptodome`（微信登录的 RSA / AES 加解密）
+
+## 前置条件
+
+1. **平台**：仅支持 `aiocqhttp`（OneBot v11）。
+2. **OneBot 实现**：必须支持文件上传扩展接口
+   - 群聊：`upload_group_file(group_id, file, name)`
+   - 私聊：`upload_private_file(user_id, file, name)`
+
+   并非所有 OneBot v11 实现都提供这两个 API。不支持时插件会明确报错，不会退化为卡片或链接。
+3. **共享缓存目录**：在 WebUI 填写 `shared_cache_dir` 绝对路径，且 **AstrBot 与 OneBot 实现端必须能以同一路径访问**（同一台机器，或 Docker 挂载到相同路径）。插件只使用该目录下自己的子目录 `astrbot_plugin_kugou_music/`。
+4. **登录**：管理员执行 `/酷狗扫码登录` 或 `/酷狗微信登录`（也可在 WebUI 填写概念版 Cookie）。插件共享同一个酷狗账号。
 
 ## 指令
 
 | 指令 | 说明 |
 | --- | --- |
-| `/酷狗搜歌 <关键词>` | 搜索歌曲，结果缓存 5 分钟 |
-| `/酷狗点歌 <序号>` | 点歌，发送音乐卡片 / 封面 + 播放链接 |
-| `/酷狗扫码登录` | 生成扫码登录链接（标准版走 PC 端，概念版走安卓端） |
-| `/酷狗微信登录` | 微信授权登录（**仅概念版**） |
-| `/酷狗退出登录` | 清除已保存的 Cookie |
-| `/酷狗登录状态` | 查看当前登录的 userid / token |
+| `/酷狗搜歌 <关键词>` | 搜索歌曲，结果缓存 5 分钟（按会话 + 发起用户隔离） |
+| `/酷狗下载 <序号>` | 按音质优先级下载并发送歌曲文件 |
+| `/酷狗点歌 <序号>` | 兼容入口，行为与 `/酷狗下载` 完全相同 |
+| `/酷狗扫码登录` | 扫码登录（概念版安卓渠道，管理员） |
+| `/酷狗微信登录` | 微信授权登录（概念版安卓小程序渠道，链接 110 秒后自动撤回，管理员） |
+| `/酷狗退出登录` | 清除插件保存的凭据（不影响 WebUI 里手动填写的 Cookie，管理员） |
+| `/酷狗登录状态` | 查看 userid、脱敏 token 与凭据来源（管理员） |
 
 ## 配置项（WebUI）
 
 | 配置项 | 说明 | 默认值 |
 | --- | --- | --- |
-| `kugou_cookie` | 酷狗 App 登录 Cookie（含 token、userid、vip_token）；免费歌曲无需填写，VIP 歌曲必填 | 空 |
-| `kugou_concept` | 开启后使用酷狗概念版（Lite）协议，独立 token 体系 | `false` |
-| `kugou_ua` | 自定义请求 UA，留空使用默认 Chrome UA | Chrome 126 |
+| `quality_priority` | 音质优先级（有序），可用值 `hires` / `flac` / `320` / `128` | `["hires","flac","320","128"]` |
+| `shared_cache_dir` | 共享缓存目录绝对路径，需 AstrBot 与 OneBot 端同路径可读 | 空（未配置时无法下载） |
+| `kugou_cookie` | 概念版登录 Cookie；可留空，用扫码/微信登录自动保存 | 空 |
+| `kugou_ua` | 自定义 User-Agent，留空使用概念版客户端 UA | 空 |
 | `search_count` | 每次搜索返回条数（1-10） | `5` |
-| `debug` | 调试模式，在消息末尾追加 `_debug` JSON 数组 | `false` |
-| `card_jump` | 卡片跳转目标：`detail`=歌曲详情页（推荐）/ `audio`=音频直链 | `detail` |
-| `music_card_key` | 咸鱼 API 签名 Token（在 https://apii.xianyuw.cn 注册获取），留空走 OIAPI | 空 |
-| `card_format` | 卡片平台标识：`kugou` / `netease` | `kugou` |
-| `timeout` | HTTP 请求超时（秒） | `15` |
+| `timeout` | 接口请求超时（秒） | `15` |
+| `debug` | 在回复末尾附加 `_debug` JSON（凭据/签名/设备指纹/直链自动脱敏） | `false` |
 
-## 支持平台
+## 音质档位与判定
 
-- `aiocqhttp`（NapCat / OneBot v11）——完整支持，音乐卡片走原生段
-- `qq_official`（QQ 官方 API）——支持搜索 / 点歌文本，音乐卡片能力受平台限制
+| 配置值 | 显示 | 上游协议参数 | 权益接口 level | 说明 |
+| --- | --- | --- | --- | --- |
+| `hires` | Hi-Res | `quality=high` | 6 | 上游没有 `hires` 参数；`high` 即 Hi-Res 档 |
+| `flac` | FLAC | `quality=flac` | 5 | 无损 |
+| `320` | 320K | `quality=320` | 4 | 高品 MP3/Ogg |
+| `128` | 128K | `quality=128` | 1/2 | 标准 MP3/Ogg（概念版对付费歌曲也可取） |
 
-## 版本要求
+判定依据是**下载后的音频头**，不是 URL 后缀或 Content-Type：
 
-- AstrBot `>= 4.17.0`
-- Python 3.9+
+- FLAC：解析 `STREAMINFO`；位深 > 16 或采样率 > 48 kHz 才标记 Hi-Res，普通 CD 规格（16 bit / 44.1 kHz）标记为 FLAC
+- MP3：解析帧头码率，并用 Xing/Info 帧计数修正 VBR 的平均码率（≥ 256 kbps 记 320 档，≥ 96 kbps 记 128 档）
+- Ogg Vorbis：解析标识头（identification header）的 nominal 码率，档位判定同上
+- HTML/JSON 错误页、加密数据、不可识别容器一律拒绝，绝不命名为音频发送
+- 实测时长明显短于搜索结果时长（超过 10% 偏差）时判定为**试听片段**，不当作完整歌曲发送
 
-## 反馈 / 交流
+内部安全默认值（不暴露为配置项）：缓存保留 1 小时、单次下载上限 200 MiB、下载超时 180 秒、并发下载 2 个、搜索缓存 5 分钟。
 
-使用中遇到 bug、有新功能建议，或想和其他用户交流：
+## 已知限制与待验证项
 
-- **提交 Issue**：[GitHub Issues](https://github.com/xiaoyunsha/astrbot_plugin_kugou_music/issues)（附上 AstrBot 版本、报错截图、开 debug 后的 `_debug` 输出，复现更快）
-- **QQ 群**：[点击加入交流群](https://qm.qq.com/q/VvXhcfuKs2)
+- **已在真实账号上验证核心链路**（2026-11-13，扫码登录后）：搜索 → 各档位权益 → 取址 → 受限下载 → 音频头实测 → 缓存复用 → 有界清理全部通过；`Hi-Res` 档实测返回 **24-bit FLAC**（44.1 kHz / 269.7 秒），被正确标记为 Hi-Res。**未验证**：OneBot 文件真正到达群/私聊（本地没有 AstrBot/OneBot 运行时）。
+- **权限由服务端裁决**：权益接口返回的 `privilege` 是**歌曲的要求**（如「需要会员」），不是本账号的资格。因此插件不会据此在本地拦下档位，而是照常请求播放地址，由服务端决定给不给；被拒绝时如实报告并附上该档位的要求提示。未登录时，需要会员的档位会直接提示先扫码登录，不会发起请求。
+- **微信登录未验证**：请求形态已按上游 `login_openplat.js` 对齐，但上游的 `dev` / 设备指纹（`KUGOU_API_GUID/MAC/DEV`）取自浏览器 Cookie，本实现以 `"0"` 占位，未在真实微信号上跑通。若微信登录失败，请使用 `/酷狗扫码登录`。
+- **设备注册 dfid 未实现**：酷狗文档提示取播放地址前可能需要 `/register/dev` 注册设备。本插件使用 Cookie 中的 `dfid/mid`，缺失时生成并持久化本机随机标识；实测（见上）未注册设备也能取得 Hi-Res。若服务端要求「本次请求需要验证」，会明确报错（可重新扫码登录）。
+- **CDN 域名允许列表**：仅接受 `*.kugou.com`、`*.kglink.com`、`*.kgidc.cn`。若酷狗新 CDN 使用其他域名，下载会以「主机不在允许列表」明确报错，需要扩充 `file_cache.ALLOWED_HOST_SUFFIXES`。
+- **NapCat / CQHTTP 等实现差异**：文件上传 API 的可用性与文件大小限制取决于具体实现，以真实端到端验证为准。
+- `/酷狗点歌` 仅作为兼容入口保留，行为与 `/酷狗下载` 相同。
+
+## 开发与测试
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest tests -q
+```
+
+测试全部离线运行（mock HTTP 会话与 OneBot API），不访问酷狗网络。未安装 `astrbot` 时，`tests/conftest.py` 会注入最小桩模块。
+
+代码结构：
+
+| 文件 | 职责 |
+| --- | --- |
+| `main.py` | AstrBot 指令、配置、生命周期、OneBot 上传协调 |
+| `kugou_client.py` | 概念版常量与签名、搜索、权益查询、多档位资源解析、档位降级编排 |
+| `kugou_login.py` | 扫码 / 微信登录协议、凭据校验 |
+| `file_cache.py` | 安全文件名、URL 安全、受限流式下载、缓存归属与清理 |
+| `audio_probe.py` | 音频头解析与实测档位判定 |
+| `quality.py` | 档位词汇表与 `quality_priority` 解析 |
+
+## 版权提醒
+
+拥有播放权限不等于拥有再分发许可。请自行确认所下载歌曲的使用与分享授权；本插件不绕过版权、付费或加密限制，也不提供试听片段以外的内容。
 
 ## 致谢
 
-- 接口签名与登录流程参考 [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)（Node.js 版），本仓库用纯 Python 重写
-- 音乐卡片签名免费端点：[OIAPI](https://oiapi.net/)
+- 接口签名、音质档位与登录流程参考 [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)（Node.js 版），本仓库用纯 Python 重写
 
 ## License
 

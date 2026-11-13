@@ -1,0 +1,30 @@
+# Local code intelligence and development task state
+.codegraph/
+.superpowers/
+.claude/
+
+# Python environments and generated caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+
+# Runtime data, account credentials, and downloaded audio
+data/
+cookie.json
+device.json
+search_cache.json
+*.part
+*.mp3
+*.flac
+*.ogg
+*.wav
+
+# Local environment settings
+.env
+.env.*
+!.env.example
