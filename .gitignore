@@ -2,6 +2,8 @@
 .codegraph/
 .superpowers/
 .claude/
+# Superpowers 设计稿与计划（按惯例写在 docs/ 下，但不入库）
+docs/superpowers/
 
 # Python environments and generated caches
 __pycache__/
