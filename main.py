@@ -869,7 +869,11 @@ class KugouMusic(Star):
         }
 
     async def _upload_outcome(self, event, outcome) -> str:
-        """通过 OneBot 群/私聊文件接口发送文件，返回给用户的结果文本。"""
+        """通过 OneBot 群/私聊文件接口发送文件。
+
+        返回**需要发给用户的提示文本**：失败时是原因与建议；成功时是空串——
+        文件本身就是结果，发送确认只写日志（见下方 logger.info），不打扰聊天。
+        """
         is_group = bool(event.get_group_id())
         target = event.get_group_id() if is_group else event.get_sender_id()
         try:
@@ -913,11 +917,13 @@ class KugouMusic(Star):
             return f"[酷狗] 文件上传失败：{reason}"
 
         source = "（复用缓存）" if outcome.from_cache else ""
-        return (
-            f"[酷狗] 已发送文件「{outcome.filename}」{source}\n"
-            f"实际音质: {outcome.label}\n"
-            "（发送成功仅表示 OneBot 接受上传请求）"
+        # 上传成功由文件本身呈现，聊天里不再补一句确认；音质已在文件名里
+        # （`歌手 - 歌名 [实际音质].扩展名`），确认信息留在日志供管理员核对。
+        logger.info(
+            "[kugou] 已发送文件「%s」%s 实际音质: %s（发送成功仅表示 OneBot 接受上传请求）",
+            outcome.filename, source, outcome.label,
         )
+        return ""
 
     @staticmethod
     def _stop(event) -> None:
@@ -1167,5 +1173,9 @@ class KugouMusic(Star):
         finally:
             await ladder.release(outcome)
 
-        yield event.plain_result(message + self._flush_debug())
+        # 上传成功时 message 为空，聊天里就到此为止（文件已送达）；`_flush_debug`
+        # 仍要调用以清空缓冲，但只有真的产出内容时才发消息，避免空文本刷屏。
+        debug = self._flush_debug()
+        if message or debug:
+            yield event.plain_result(message + debug)
         self._stop(event)

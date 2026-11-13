@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import time
 
@@ -1209,7 +1210,31 @@ def test_upload_retcode_failure_is_reported(plugin_factory, monkeypatch, tmp_pat
     assert "1200" in event.text or "file too large" in event.text
 
 
-def test_upload_reports_success_for_unwrapped_onebot_data(plugin_factory, monkeypatch, tmp_path):
+def test_upload_success_is_logged_instead_of_sent_to_chat(
+    plugin_factory, monkeypatch, tmp_path, caplog
+):
+    """上传成功只写日志：聊天里除了进度提示不该再多一句「已发送文件」。"""
+    plugin = plugin_factory()
+    _install_ladder(
+        plugin, monkeypatch, _StubLadder(outcome=_outcome(str(tmp_path / "a.flac")))
+    )
+
+    event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=FakeBot())
+    _seed_cache(plugin, event)
+
+    with caplog.at_level(logging.INFO, logger="astrbot"):
+        collect(plugin.cmd_search(event))
+
+    assert "已发送文件" not in event.text
+    assert "实际音质" not in event.text
+    assert [kind for kind, _ in event.results] == ["plain"]   # 只剩进度提示，没多出一条空消息
+    assert _FILENAME in caplog.text and "已发送文件" in caplog.text
+    assert event.stopped is True
+
+
+def test_upload_reports_success_for_unwrapped_onebot_data(
+    plugin_factory, monkeypatch, tmp_path, caplog
+):
     """真实 aiocqhttp 只回 data 字段：这就是上传成功，不能报失败。"""
     plugin = plugin_factory()
     _install_ladder(plugin, monkeypatch, _StubLadder(outcome=_outcome(str(tmp_path / "a.flac"))))
@@ -1218,10 +1243,11 @@ def test_upload_reports_success_for_unwrapped_onebot_data(plugin_factory, monkey
     event = FakeEvent("搜歌 晴天 1", group_id="1000", sender_id="42", bot=bot)
     _seed_cache(plugin, event)
 
-    collect(plugin.cmd_search(event))
+    with caplog.at_level(logging.INFO, logger="astrbot"):
+        collect(plugin.cmd_search(event))
 
     assert "失败" not in event.text
-    assert "已发送文件" in event.text
+    assert "已发送文件" in caplog.text          # 成功留痕在日志，不在聊天
     assert event.stopped is True
 
 
