@@ -119,3 +119,90 @@ def json_error() -> bytes:
 
 def m4a_head() -> bytes:
     return b"\x00\x00\x00\x18ftypM4A " + b"\x00" * 32
+
+
+# ── 完整可加载文件（给标签读写测试用） ────────────────────────────────────
+#
+# 上面的构造器只造**音频头**，够 audio_probe 用，但 mutagen 加载不了
+# （OGG 尤其——只有标识头，缺 comment/setup 头）。下面这些造出 mutagen
+# 能真正打开的最小文件，用来验证标签写入。
+
+
+def mp3_file(bitrate_idx: int = 9, sample_rate_idx: int = 0, frames: int = 4) -> bytes:
+    """返回 ``frames`` 个合法 MPEG-1 Layer III 帧拼成的 MP3 数据。"""
+    header = mp3_frame(bitrate_idx, sample_rate_idx)
+    bitrate = mp3_bitrate(bitrate_idx) // 1000
+    sample_rate = SAMPLE_RATES[3][sample_rate_idx]
+    frame_len = 144 * bitrate * 1000 // sample_rate
+    return (header + bytes(frame_len - 4)) * frames
+
+
+def flac_file(sample_rate: int = 44100, bits: int = 16, channels: int = 2,
+              total_samples: int = 44100 * 10) -> bytes:
+    """返回只含 STREAMINFO 的最小 FLAC（无音频帧，mutagen 可加载并改写元数据）。"""
+    return flac_head(sample_rate, bits, channels, total_samples)
+
+
+def _ogg_crc(data: bytes) -> int:
+    """Ogg 页 CRC：多项式 0x04c11db7，初值 0，非反射，无最终异或。"""
+    crc = 0
+    for byte in data:
+        crc ^= byte << 24
+        for _ in range(8):
+            if crc & 0x80000000:
+                crc = ((crc << 1) ^ 0x04C11DB7) & 0xFFFFFFFF
+            else:
+                crc = (crc << 1) & 0xFFFFFFFF
+    return crc
+
+
+def _ogg_page(packets: list, header_type: int = 0, seq: int = 0,
+              serial: int = 1, granule: int = 0) -> bytes:
+    """把若干 packet 打包成一个 Ogg 页，并写入正确的 CRC。"""
+    segments: list[int] = []
+    payload = b""
+    for packet in packets:
+        segments += [255] * (len(packet) // 255) + [len(packet) % 255]
+        payload += packet
+    head = (
+        b"OggS"
+        + bytes([0, header_type])
+        + granule.to_bytes(8, "little", signed=True)
+        + serial.to_bytes(4, "little")
+        + seq.to_bytes(4, "little")
+        + b"\x00\x00\x00\x00"          # CRC 占位，算完回填
+        + bytes([len(segments)])
+        + bytes(segments)
+    )
+    page = head + payload
+    crc = _ogg_crc(page)
+    return page[:22] + crc.to_bytes(4, "little") + page[26:]
+
+
+def ogg_file(sample_rate: int = 44100, channels: int = 2,
+             nominal: int = 128000) -> bytes:
+    """返回含完整三头（标识 + 注释 + setup）分页的最小 Ogg Vorbis。"""
+    ident = (
+        b"\x01vorbis"
+        + (0).to_bytes(4, "little")
+        + bytes([channels])
+        + sample_rate.to_bytes(4, "little")
+        + (0).to_bytes(4, "little", signed=True)
+        + nominal.to_bytes(4, "little", signed=True)
+        + (0).to_bytes(4, "little", signed=True)
+        + bytes([0xB8])                # blocksize_0/1
+        + b"\x01"                      # framing flag
+    )
+    vendor = b"astrbot_plugin_kugou_music-tests"
+    comment = (
+        b"\x03vorbis"
+        + len(vendor).to_bytes(4, "little") + vendor
+        + (0).to_bytes(4, "little")    # 无注释项
+        + b"\x01"                      # framing bit
+    )
+    setup = b"\x05vorbis" + bytes(64) + b"\x01"
+    return (
+        _ogg_page([ident], header_type=0x02, seq=0)
+        + _ogg_page([comment, setup], header_type=0x04, seq=1)
+    )
+

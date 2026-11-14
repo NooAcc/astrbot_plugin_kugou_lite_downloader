@@ -475,7 +475,7 @@ def test_ensure_ready_rejects_linked_cache_subdir(tmp_path):
 # ── 下载 + 探针 + 入库 ───────────────────────────────────────────────────
 
 
-def _make_fetcher(tmp_path, responses, limits=None):
+def _make_fetcher(tmp_path, responses, limits=None, tagger=None):
     cache = _make_cache(tmp_path)
     session = FakeSession(responses)
     downloader = Downloader(
@@ -484,7 +484,7 @@ def _make_fetcher(tmp_path, responses, limits=None):
         resolver=_public,
         user_agent="ua",
     )
-    return AudioFetcher(downloader, cache), cache, session
+    return AudioFetcher(downloader, cache, tagger=tagger), cache, session
 
 
 def test_fetcher_rejects_non_audio_payload(tmp_path):
@@ -630,3 +630,162 @@ def test_prune_expired_entries_skips_symlink(tmp_path):
     prune_expired_entries(str(tmp_path), 0)   # TTL=0：能删的都删
 
     assert link.is_symlink()                  # 链接本身不被删除
+
+
+# ── 缓存键的标签版本号 ───────────────────────────────────────────────────
+
+
+def test_resource_key_unchanged_without_tag_version():
+    song = {"hash": "ABC", "album_audio_id": 1}
+    assert CacheManager.resource_key(song) == CacheManager.resource_key(song, "")
+
+
+def test_resource_key_differs_with_tag_version():
+    song = {"hash": "ABC", "album_audio_id": 1}
+    assert CacheManager.resource_key(song, "tagv1") != CacheManager.resource_key(song)
+
+
+def test_resource_key_is_stable_across_calls():
+    song = {"hash": "ABC", "album_audio_id": 1}
+    assert CacheManager.resource_key(song, "tagv1") == CacheManager.resource_key(song, "tagv1")
+
+
+def test_resource_key_matches_pre_change_value_without_version():
+    """不变量：开关关闭时必须与 2.5.0 的键逐字节一致，否则会白丢整份缓存。"""
+    import hashlib
+    song = {"hash": "ABC", "album_audio_id": 1}
+    expected = hashlib.sha1(b"abc:1").hexdigest()[:16]
+    assert CacheManager.resource_key(song) == expected
+
+
+# ── 入库前打标、复探与回退 ───────────────────────────────────────────────
+
+_SONG = {"hash": "ABCDEF", "album_audio_id": 456, "songname": "晴天", "singername": "周杰伦"}
+
+# 声明的 ID3v2 尺寸远超缓冲区：probe 会跳过整块后找不到帧同步点
+_BOGUS_ID3 = b"ID3" + bytes([3, 0, 0]) + b"\x7f\x7f\x7f\x7f" + bytes(64)
+
+
+class _FakeTagger:
+    def __init__(self, ok=True, corrupt=False):
+        self.ok = ok
+        self.corrupt = corrupt
+        self.stripped = False
+        self.calls = []
+        self.strip_thread = None
+        self._backup = None
+
+    async def apply(self, path, extension, song):
+        self.calls.append((path, extension, song))
+        if not self.ok:
+            return False
+        if self.corrupt:
+            with open(path, "rb") as handle:
+                self._backup = handle.read()
+            with open(path, "wb") as handle:
+                handle.write(_BOGUS_ID3)
+        return True
+
+    def strip(self, path, extension):
+        import threading
+
+        self.strip_thread = threading.current_thread()
+        self.stripped = True
+        if self._backup is not None:          # 还原未打标的字节
+            with open(path, "wb") as handle:
+                handle.write(self._backup)
+        return True
+
+
+def test_fetch_calls_tagger_with_detected_extension(tmp_path):
+    tagger = _FakeTagger()
+    fetcher, _, _ = _make_fetcher(tmp_path, [FakeResponse([flac_head()])], tagger=tagger)
+
+    result = asyncio.run(fetcher.fetch("key1", "flac", [_AUDIO_URL], _SONG))
+
+    # 打标发生在入库之前，因此打标器看到的是任务目录里的半成品路径
+    assert len(tagger.calls) == 1
+    tagged_path, tagged_extension, tagged_song = tagger.calls[0]
+    assert tagged_extension == "flac"
+    assert tagged_song == _SONG
+    assert tagged_path.endswith(".part")
+    assert tagger.stripped is False
+    assert result.actual_tier == "flac"
+    assert os.path.isfile(result.path)
+
+
+def test_fetch_without_song_does_not_tag(tmp_path):
+    tagger = _FakeTagger()
+    fetcher, _, _ = _make_fetcher(tmp_path, [FakeResponse([flac_head()])], tagger=tagger)
+
+    asyncio.run(fetcher.fetch("key1", "flac", [_AUDIO_URL]))
+
+    assert tagger.calls == []
+
+
+def test_fetch_still_stores_when_tagger_returns_false(tmp_path):
+    tagger = _FakeTagger(ok=False)
+    fetcher, cache, _ = _make_fetcher(tmp_path, [FakeResponse([flac_head()])], tagger=tagger)
+
+    result = asyncio.run(fetcher.fetch("key1", "flac", [_AUDIO_URL], _SONG))
+
+    assert tagger.calls != []
+    assert os.path.isfile(result.path)
+    assert cache.cached_path("key1", "flac") == result.path
+
+
+def test_fetch_reverts_when_tagged_file_no_longer_probes(tmp_path):
+    tagger = _FakeTagger(corrupt=True)
+    fetcher, cache, _ = _make_fetcher(tmp_path, [FakeResponse([flac_head()])], tagger=tagger)
+
+    result = asyncio.run(fetcher.fetch("key1", "flac", [_AUDIO_URL], _SONG))
+
+    assert tagger.stripped is True                 # 打了标又回退了
+    assert result.actual_tier == "flac"            # 档位仍是打标前实测的
+    assert cache.cached_path("key1", "flac") == result.path
+    # 回退后的文件必须仍能被复探（否则缓存会每次失效重下）
+    assert asyncio.run(fetcher.cached("key1", "flac")) is not None
+
+
+@pytest.mark.parametrize("name,tier", [("mp3", "320"), ("flac", "flac"), ("ogg", "128")])
+def test_real_tags_do_not_change_detected_tier(tmp_path, monkeypatch, name, tier):
+    """核心不变量：真写标签之后，probe/tier_of 的结果必须与打标前一致。"""
+    from audio_builders import flac_file, mp3_file, ogg_file
+
+    import tagger as tagger_module
+    from metadata import TrackMeta
+
+    meta = TrackMeta(title="晴天", artists=("周杰伦",), album="叶惠美",
+                     lyric="[ti:晴天]\n", genre="流行")
+
+    async def fake_collect(client, song):
+        return meta
+    monkeypatch.setattr(tagger_module, "collect_track_meta", fake_collect)
+
+    # bitrate_idx=13 才是 256 kbps（idx 9 是 128 kbps）
+    body = {"mp3": lambda: mp3_file(bitrate_idx=13),
+            "flac": flac_file, "ogg": ogg_file}[name]()
+    real = tagger_module.Tagger(client=None, covers=None, embed_cover=False)
+    fetcher, cache, _ = _make_fetcher(tmp_path, [FakeResponse([body])], tagger=real)
+
+    result = asyncio.run(fetcher.fetch("key1", tier, [_AUDIO_URL], _SONG))
+
+    assert result.actual_tier == tier
+    assert result.extension == name
+    # 打标后仍能被缓存复探认出（否则会反复失效重下）
+    reuse = asyncio.run(fetcher.cached("key1", tier))
+    assert reuse is not None and reuse.path == result.path
+
+
+def test_revert_runs_strip_off_the_event_loop(tmp_path):
+    """delete_tags 会全量重写文件，回退也必须离开事件循环。"""
+    import threading
+
+    tagger = _FakeTagger(corrupt=True)
+    fetcher, _, _ = _make_fetcher(tmp_path, [FakeResponse([flac_head()])], tagger=tagger)
+
+    asyncio.run(fetcher.fetch("key1", "flac", [_AUDIO_URL], _SONG))
+
+    assert tagger.stripped is True
+    assert tagger.strip_thread is not None
+    assert tagger.strip_thread is not threading.main_thread()

@@ -8,12 +8,14 @@ desc: |
   - 卡片使用 HarmonyOS Sans SC 渲染，跨平台一致；字体不随插件分发，首次使用时按需从固定镜像取回并校验（`font_auto_download`）
   - 音质优先级：WebUI 配置 `quality_priority`，默认 Hi-Res → FLAC → 高品 320 → 标准 128，实测档位不达标会自动降级
   - 搜歌返回带封面的图片卡片；下载只发送音频文件附件，不发送音乐卡片、语音或播放直链
+  - 下载时写入媒体信息与歌词：标题 / 歌手 / 专辑 / 作词作曲 / 发行日期 / 曲风 / 封面 / LRC 歌词
+    （`embed_tags`，可关闭；MP3 走 ID3v2，FLAC/OGG 走 Vorbis comment）。音频本身不转码
   - 缓存保留时长可配：`cache_ttl_hours`（默认 24 小时），统一控制音频文件、封面图片与卡片图
   - 登录：`/酷狗登录`，二维码图片直发聊天，完成后或 100 秒超时自动撤回；或 WebUI 手动填写 Cookie
   - 必须配置共享缓存目录（AstrBot 与 OneBot 端同一路径）；OneBot 实现需支持
     `upload_group_file` / `upload_private_file` 扩展接口
   - 需要 OneBot v11（aiocqhttp）平台
-version: 2.5.0
+version: 2.6.0
 author: NooAcc
 repo: https://github.com/NooAcc/astrbot_plugin_kugou_lite_downloader
 astrbot_version: ">=4.17.0"

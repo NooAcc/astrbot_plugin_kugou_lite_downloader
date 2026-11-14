@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import shutil
@@ -19,6 +20,8 @@ import time
 import uuid
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit
+
+logger = logging.getLogger(__name__)
 
 try:
     from .audio_probe import extension_of, probe, refine_bitrate, tier_of
@@ -448,13 +451,27 @@ class CacheManager:
     `<shared_root>/tmp/<task>/`，绝不触碰共享目录里的其他内容。
     """
 
-    def __init__(self, shared_root: str):
+    def __init__(self, shared_root: str, *, tag_version: str = ""):
         self._raw = shared_root or ""
         self.root = os.path.abspath(shared_root) if shared_root else ""
         self.cache_dir = os.path.join(self.root, CACHE_DIRNAME) if self.root else ""
         self.tmp_dir = os.path.join(self.root, TMP_DIRNAME) if self.root else ""
+        self._tag_version = str(tag_version or "")
         self._held: set[str] = set()
         self._ready = False
+
+    @property
+    def tag_version(self) -> str:
+        """本实例的标签版本号（空串表示缓存里的文件不带标签）。"""
+        return self._tag_version
+
+    def key_for(self, song: dict) -> str:
+        """本实例使用的缓存键——带上本实例的标签版本号。
+
+        `DownloadLadder` 用这个而不是 `resource_key(song)`：开关打开与关闭时
+        缓存里存的文件不同，两者的键必须不同，不能互相命中。
+        """
+        return self.resource_key(song, self._tag_version)
 
     def ensure_ready(self) -> None:
         """创建并校验目录归属；不可用时抛 `SharedDirError`。"""
@@ -496,14 +513,20 @@ class CacheManager:
         self._ready = True
 
     @staticmethod
-    def resource_key(song: dict) -> str:
+    def resource_key(song: dict, tag_version: str = "") -> str:
         """歌曲在缓存中的稳定标识（`hash` + `album_audio_id`）。
 
         同一首歌在不同的搜索会话里可能带不同的序号/字段，但这两个标识
         稳定不变，因此用它做缓存键，跨会话也能复用。
+
+        `tag_version` 不为空时并入键——**不变量：缓存键必须唯一决定文件内容**。
+        打开标签写入后，缓存里存的文件与关闭时不同，两者不能互相命中。
+        传空串时与加入该参数之前**逐字节一致**，因此开关关闭时行为不变。
         """
-        raw = f"{song.get('hash') or ''}:{song.get('album_audio_id') or ''}".lower()
-        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+        raw = f"{song.get('hash') or ''}:{song.get('album_audio_id') or ''}"
+        if tag_version:
+            raw = f"{raw}:{tag_version}"
+        return hashlib.sha1(raw.lower().encode("utf-8")).hexdigest()[:16]
 
     def _write_manifest(self) -> None:
         path = os.path.join(self.root, MANIFEST_NAME)
@@ -681,10 +704,12 @@ class FetchResult:
 class AudioFetcher:
     """受限并发地下载音频、用音频头校验、并按实测档位入库。"""
 
-    def __init__(self, downloader: Downloader, cache: CacheManager, limits: Limits | None = None):
+    def __init__(self, downloader: Downloader, cache: CacheManager, limits: Limits | None = None,
+                 tagger=None):
         self._downloader = downloader
         self._cache = cache
         self.limits = limits or downloader.limits
+        self._tagger = tagger
         self._semaphore: asyncio.Semaphore | None = None
         self._inflight: dict[str, asyncio.Future] = {}
 
@@ -708,12 +733,19 @@ class AudioFetcher:
             reused=True,
         )
 
-    async def fetch(self, resource_key: str, requested_tier: str, urls: list[str]) -> FetchResult:
-        """下载并校验。同一 `(资源, 请求档位)` 的并发调用会合并为一次下载。"""
+    async def fetch(self, resource_key: str, requested_tier: str, urls: list[str],
+                    song: dict | None = None) -> FetchResult:
+        """下载并校验。同一 `(资源, 请求档位)` 的并发调用会合并为一次下载。
+
+        `song` 只用于给文件写媒体信息与歌词的标签；为 `None` 或未装配打标器时
+        行为与加入该参数之前完全一致（缓存与打标签的接入见 `_maybe_tag`）。
+        """
         key = f"{resource_key}::{requested_tier}"
         task = self._inflight.get(key)
         if task is None:
-            task = asyncio.ensure_future(self._fetch_once(resource_key, requested_tier, urls))
+            task = asyncio.ensure_future(
+                self._fetch_once(resource_key, requested_tier, urls, song)
+            )
             self._inflight[key] = task
             task.add_done_callback(lambda done, k=key: self._forget(k, done))
         return await asyncio.shield(task)
@@ -731,8 +763,41 @@ class AudioFetcher:
         except OSError:
             return probe(b"")
 
+    async def _maybe_tag(self, part_path: str, info, tier: str, extension: str,
+                         song: dict | None):
+        """在 `store()` **之前**给半成品写标签，并复探确认没把自己写坏。
+
+        接入点放在入库之前，是为了让缓存里**永远不存在未打标的条目**——缓存命中
+        因此不需要重写文件（无损文件的全量重写很贵）。
+
+        打标后的实测结果才是权威：它以磁盘上的真实字节为准，与缓存命中路径
+        `_probe_file` 用 `os.path.getsize()` 的算法一致，避免两条路径算出不同档位。
+        复探不通过（例如标签把 ID3v2 撑过 `head_bytes`，`probe` 找不到帧同步点）
+        就删掉刚写的标签回退，绝不让一个探不出来的文件入库——否则它会在**每次**
+        缓存命中时被判「档位不符」而反复重下。
+        """
+        if self._tagger is None or song is None:
+            return info
+        try:
+            applied = await self._tagger.apply(part_path, extension, song)
+        except Exception as exc:
+            logger.warning("[kugou] 打标签异常，按未打标继续：%s", type(exc).__name__)
+            return info
+        if not applied:
+            return info
+        tagged = self._probe_file(part_path)
+        if tagged.valid and tier_of(tagged) == tier:
+            return tagged
+        logger.warning("[kugou] 打标签后无法复探（档位 %s），已回退为未打标", tier)
+        try:
+            # strip 会全量重写文件，和写入一样必须离开事件循环
+            await asyncio.to_thread(self._tagger.strip, part_path, extension)
+        except Exception as exc:
+            logger.warning("[kugou] 回退标签失败：%s", type(exc).__name__)
+        return info
+
     async def _fetch_once(self, resource_key: str, requested_tier: str,
-                          urls: list[str]) -> FetchResult:
+                          urls: list[str], song: dict | None = None) -> FetchResult:
         if self._semaphore is None:
             # 延迟到运行中的事件循环里创建，兼容 Python 3.9 的循环绑定
             self._semaphore = asyncio.Semaphore(self.limits.max_concurrency)
@@ -748,6 +813,7 @@ class AudioFetcher:
                 if not tier:
                     raise DownloadError("音频规格无法识别或低于最低档位")
                 extension = extension_of(info)
+                info = await self._maybe_tag(part_path, info, tier, extension, song)
                 final = self._cache.store(
                     part_path, resource_key, tier, f"{resource_key}__{tier}.{extension}"
                 )

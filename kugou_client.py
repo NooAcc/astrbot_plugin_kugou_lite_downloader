@@ -656,7 +656,7 @@ class DownloadLadder:
         self._priority = list(quality_priority)
 
     async def run(self, song: dict) -> DownloadOutcome:
-        key = self._cache.resource_key(song)
+        key = self._cache.key_for(song)
         reasons: list[tuple[str, str]] = []
         options = None
 
@@ -692,7 +692,7 @@ class DownloadLadder:
                 continue
 
             try:
-                result = await self._fetcher.fetch(key, tier, resolved.urls)
+                result = await self._fetcher.fetch(key, tier, resolved.urls, song)
             except (SharedDirError, UnsafeUrlError):
                 raise                      # 目录/配置/地址安全错误：不当作音质问题
             except DownloadError as exc:
@@ -779,7 +779,10 @@ def normalize_songs(payload: dict) -> list[dict]:
             "singername": str(_first(item, "singername", "SingerName") or ""),
             "album": str(_first(item, "AlbumName", "album_name", "AlbumSingleName") or ""),
             "album_id": "" if album_id is None else str(album_id),
-            "album_audio_id": _first(item, "album_audio_id", "AlbumAudioID") or "",
+            # 概念版搜索不带 album_audio_id，同一含义的 id 叫 MixSongID（或 ID）。
+            # 漏读会让下游的 /kmr/audio 以 entity_id=0 请求，拿到空条目。
+            "album_audio_id": _first(item, "album_audio_id", "AlbumAudioID",
+                                     "MixSongID", "ID") or "",
             "cover": _cover_url(item),
             "duration": duration,
             "pay_type": _to_int(_first(item, "pay_type", "PayType")),

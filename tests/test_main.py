@@ -1628,3 +1628,63 @@ def test_search_image_card_appends_debug_text(plugin_factory, monkeypatch):
 
     assert [kind for kind, _ in event.results] == ["image", "plain"]
     assert "[_debug]" in event.results[1][1]
+
+
+# ── 标签与歌词的装配 ─────────────────────────────────────────────────────
+
+
+def test_conf_schema_declares_embed_defaults():
+    import json
+
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_conf_schema.json"
+    )
+    with open(path, encoding="utf-8") as handle:
+        schema = json.load(handle)
+    assert schema["embed_tags"]["default"] is True
+    assert schema["embed_cover"]["default"] is True
+
+
+def test_ladder_builds_tagger_by_default(plugin_factory, shared_dir):
+    plugin = plugin_factory({"shared_cache_dir": shared_dir})
+    plugin._session = FakeSession([])
+
+    asyncio.run(plugin._ladder_for_download())
+
+    assert plugin._tagger is not None
+
+
+def test_ladder_has_no_tagger_when_disabled(plugin_factory, shared_dir):
+    plugin = plugin_factory({"shared_cache_dir": shared_dir, "embed_tags": False})
+    plugin._session = FakeSession([])
+
+    asyncio.run(plugin._ladder_for_download())
+
+    assert plugin._tagger is None
+
+
+def test_cache_key_differs_between_tag_on_and_off(plugin_factory, shared_dir):
+    """开关关闭时必须与 2.5.0 的键一致，打开后必须换一套键，两者不能互相命中。"""
+    song = {"hash": "A", "album_audio_id": 1}
+    on = plugin_factory({"shared_cache_dir": shared_dir, "embed_tags": True})
+    on._session = FakeSession([])
+    asyncio.run(on._ladder_for_download())
+    off = plugin_factory({"shared_cache_dir": shared_dir, "embed_tags": False})
+    off._session = FakeSession([])
+    asyncio.run(off._ladder_for_download())
+
+    assert on._cache_manager.key_for(song) != off._cache_manager.key_for(song)
+    assert off._cache_manager.key_for(song) == off._cache_manager.resource_key(song)
+
+
+def test_toggling_embed_tags_rebuilds_cache_and_fetcher(plugin_factory, shared_dir):
+    plugin = plugin_factory({"shared_cache_dir": shared_dir, "embed_tags": False})
+    plugin._session = FakeSession([])
+    asyncio.run(plugin._ladder_for_download())
+    fetcher_off = plugin._fetcher
+
+    plugin.config["embed_tags"] = True
+    asyncio.run(plugin._ladder_for_download())
+
+    assert plugin._fetcher is not fetcher_off
+    assert plugin._tagger is not None

@@ -1,14 +1,24 @@
 # LICENSES
 
-本目录存放项目内第三方资源（目前只有卡片字体）的许可说明。
+本目录存放项目内第三方资源与依赖的许可说明。
 
 | 文件 | 许可 | 覆盖范围 |
 | --- | --- | --- |
 | `HarmonyOS-Fonts-MIT.txt` | MIT | [IKKI2000/harmonyos-fonts](https://gitee.com/IKKI2000/harmonyos-fonts) 镜像仓库本身的打包代码与目录结构；字体文件的取回地址也来自该仓库 |
+| `mutagen-GPL-2.0.txt` | GPL-2.0-or-later | [quodlibet/mutagen](https://github.com/quodlibet/mutagen)：写入音频标签的**运行时依赖**（`pip` 安装，不随本插件分发） |
 
 这些文件是第三方许可的**原文副本，请勿修改**。
 
 项目主许可为根目录的 [LICENSE](../LICENSE)（MIT）。
+
+## mutagen（GPL-2.0-or-later）
+
+本插件**唯一**的非 MIT 运行时依赖，用于把媒体信息与歌词写进下载到的音频文件
+（`embed_tags` 开启时）。采用方式是**运行时 `pip` 依赖**：不随插件打包分发、不修改
+mutagen 源码、不做静态链接，因此 GPL 的 copyleft 只约束 mutagen 自身，不传染本插件
+的 MIT 代码。这是社区普遍做法；如果你要重新分发本插件，请一并遵守 mutagen 的许可条款。
+
+关闭 `embed_tags` 后本插件不会 import mutagen。
 
 ## 字体本体
 

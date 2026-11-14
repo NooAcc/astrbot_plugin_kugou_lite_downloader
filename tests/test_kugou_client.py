@@ -527,12 +527,14 @@ class _FakeFetcher:
         self._results = dict(results or {})
         self._cached = dict(cached or {})
         self.downloads = []
+        self.songs = []
 
     async def cached(self, key, tier):
         return self._cached.get(tier)
 
-    async def fetch(self, key, tier, urls):
+    async def fetch(self, key, tier, urls, song=None):
         self.downloads.append(tier)
+        self.songs.append(song)
         result = self._results.get(tier)
         if isinstance(result, Exception):
             raise result
@@ -546,6 +548,9 @@ class _FakeCache:
         self.discarded = []
 
     def resource_key(self, song):
+        return "key1"
+
+    def key_for(self, song):
         return "key1"
 
     def release(self, path):
@@ -822,3 +827,34 @@ def test_normalize_missing_album_and_cover_are_empty():
     client, _ = _client([json_response(payload)])
     song = asyncio.run(client.search("x", 1))[0]
     assert song["album"] == "" and song["cover"] == ""
+
+
+def test_ladder_hands_the_song_to_the_fetcher():
+    """打标签需要歌曲元信息，因此 ladder 必须把 song 透传给 fetch。"""
+    fetcher = _FakeFetcher(results={"flac": _fetch_result("flac")})
+    ladder, _ = _ladder(["flac"], [_option("flac")], fetcher)
+
+    asyncio.run(ladder.run(_SONG_LADDER))
+
+    assert fetcher.songs == [_SONG_LADDER]
+
+
+def test_normalize_reads_mixsongid_as_album_audio_id():
+    """概念版搜索把结果放在 data.lists，且 id 只叫 MixSongID/ID，
+    没有 album_audio_id —— 不认就会退化成 entity_id=0 的空请求。"""
+    payload = {"status": 1, "data": {"lists": [{
+        "hash": "H1", "songname": "晴天", "singername": "周杰伦",
+        "MixSongID": "32100650",
+    }]}}
+    client, _ = _client([json_response(payload)])
+    song = asyncio.run(client.search("x", 1))[0]
+    assert song["album_audio_id"] == "32100650"
+
+
+def test_normalize_falls_back_to_id_when_mixsongid_absent():
+    payload = {"status": 1, "data": {"lists": [{
+        "hash": "H1", "songname": "晴天", "singername": "周杰伦", "ID": "32100650",
+    }]}}
+    client, _ = _client([json_response(payload)])
+    song = asyncio.run(client.search("x", 1))[0]
+    assert song["album_audio_id"] == "32100650"

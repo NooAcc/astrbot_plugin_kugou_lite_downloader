@@ -55,6 +55,20 @@
     "hint": "搜歌卡片用 HarmonyOS Sans SC 渲染。字体不随插件分发（两份共 16 MB，会拖累插件更新），开启时允许从固定镜像（gitee.com）取回并按内容校验后落盘，首次装好后需要联网一次。内网/离线环境可关闭：此时卡片退回 AstrBot 默认字体（数据目录的 font.ttf，其次系统字体），版式会跑但搜歌与下载不受影响。",
     "obvious_hint": true
   },
+  "embed_tags": {
+    "description": "下载时写入媒体信息与歌词",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，下载的歌曲文件会带有标题、歌手、专辑、作词/作曲、发行日期、曲风与歌词标签，任何播放器打开即可看到。音频本身一个字节都不改（不转码）。关闭后行为与 2.5.0 完全一致，不写入任何标签。",
+    "obvious_hint": true
+  },
+  "embed_cover": {
+    "description": "把封面嵌入标签",
+    "type": "bool",
+    "default": true,
+    "hint": "仅在开启「写入媒体信息与歌词」时生效。每首会因此增加几十到几百 KB。封面取不到或体积超限时会自动跳过，不影响其余标签。",
+    "obvious_hint": true
+  },
   "timeout": {
     "description": "接口请求超时（秒）",
     "type": "int",

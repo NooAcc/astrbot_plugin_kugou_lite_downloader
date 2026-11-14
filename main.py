@@ -67,6 +67,7 @@ try:
     from .font_store import FontStore, candidates_by_weight
     from .quality import ConfigError, parse_quality_priority
     from .search_card import CardRenderError, render_search_card
+    from .tagger import Tagger
 except ImportError:  # 以顶层模块方式导入（离线测试）
     from file_cache import (
         AudioFetcher,
@@ -107,8 +108,13 @@ except ImportError:  # 以顶层模块方式导入（离线测试）
     from font_store import FontStore, candidates_by_weight
     from quality import ConfigError, parse_quality_priority
     from search_card import CardRenderError, render_search_card
+    from tagger import Tagger
 
 PLUGIN_DIRNAME = "astrbot_plugin_kugou_lite_downloader"
+
+#: 缓存键里的标签版本号。打开标签写入后缓存内容与关闭时不同，两者不能互相命中；
+#: 将来标签格式再变时递增它即可让旧条目自然失效。
+TAG_VERSION = "tagv1"
 
 SEARCH_TTL_SECONDS = 300
 #: 缓存保留时长的默认值（小时）；实际值来自配置项 `cache_ttl_hours`。
@@ -259,6 +265,7 @@ class KugouMusic(Star):
         self._cache_manager: CacheManager | None = None
         self._cache_root = ""
         self._fetcher: AudioFetcher | None = None
+        self._tagger = None
         self._device: Device | None = None
         self._last_cleanup = 0.0
 
@@ -492,12 +499,17 @@ class KugouMusic(Star):
         priority = self._quality_priority()          # 非法档位在此报配置错误
         session = await self._get_session()
 
-        if self._cache_manager is None or self._cache_root != shared_root:
-            cache = CacheManager(shared_root)
+        embed_tags = bool(self.config.get("embed_tags", True))
+        tag_version = TAG_VERSION if embed_tags else ""
+        # 开关一变就要换一套缓存与装配：两种模式的缓存内容不同，不能互相命中
+        if (self._cache_manager is None or self._cache_root != shared_root
+                or self._cache_manager.tag_version != tag_version):
+            cache = CacheManager(shared_root, tag_version=tag_version)
             cache.ensure_ready()
             self._cache_manager = cache
             self._cache_root = shared_root
             self._fetcher = None
+            self._tagger = None
         if self._fetcher is None:
             downloader = Downloader(
                 session,
@@ -508,7 +520,16 @@ class KugouMusic(Star):
                 ),
                 user_agent=KG_UA,
             )
-            self._fetcher = AudioFetcher(downloader, self._cache_manager)
+            tagger = None
+            if embed_tags:
+                covers = CoverCache(session, self._covers_dir(), user_agent=self._ua())
+                tagger = Tagger(
+                    self._make_client(session), covers,
+                    embed_cover=bool(self.config.get("embed_cover", True)),
+                )
+            self._tagger = tagger
+            self._fetcher = AudioFetcher(downloader, self._cache_manager, tagger=tagger)
+
 
         self._cleanup_cache()        # 运行期有界清理（内部限频）
         return DownloadLadder(
