@@ -118,6 +118,33 @@ def test_plugin_uses_plugin_data_dir_for_state(plugin_factory):
     assert plugin._search_cache == {}
 
 
+def test_plugin_state_uses_astrbot_data_dir_not_working_directory(tmp_path, monkeypatch):
+    from astrbot.api.star import StarTools
+    from pathlib import Path
+
+    data_dir = tmp_path / "astrbot-data" / "plugin_data" / "astrbot_plugin_kugou_lite_downloader"
+
+    def get_data_dir(plugin_name=None):
+        assert plugin_name == "astrbot_plugin_kugou_lite_downloader"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        return data_dir
+
+    monkeypatch.setattr(StarTools, "get_data_dir", get_data_dir)
+    working_dir = tmp_path / "unrelated-working-dir"
+    working_dir.mkdir()
+    monkeypatch.chdir(working_dir)
+
+    plugin = main.KugouMusic(None, {"font_auto_download": False})
+    device = plugin._get_device()
+
+    assert Path(plugin._data_dir) == data_dir
+    assert Path(plugin._cookie_file).parent == data_dir
+    assert Path(plugin._search_cache_file).parent == data_dir
+    assert (data_dir / "device.json").is_file()
+    assert main.KugouMusic(None, {"font_auto_download": False})._get_device() == device
+    assert not (working_dir / "data").exists()
+
+
 def test_plugin_survives_non_dict_search_cache(plugin_factory, tmp_path):
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True)

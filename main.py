@@ -23,7 +23,7 @@ import aiohttp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import PermissionType
-from astrbot.api.star import Context, Star
+from astrbot.api.star import Context, Star, StarTools
 
 # 同时兼容两种导入方式：AstrBot 以包路径 data.plugins.<dir>.main 加载时走
 # 相对导入；离线测试/工具以顶层模块 main 加载时回退到绝对导入。
@@ -135,8 +135,8 @@ SEARCH_USAGE = (
 
 
 def plugin_data_dir() -> str:
-    """AstrBot 插件数据目录（凭据与搜索状态，绝不放共享音频目录）。"""
-    return os.path.join(os.getcwd(), "data", "plugin_data", PLUGIN_DIRNAME)
+    """由 AstrBot 解析插件数据目录（凭据与搜索状态，绝不放共享音频目录）。"""
+    return str(StarTools.get_data_dir(PLUGIN_DIRNAME))
 
 
 def parse_shared_dir(raw) -> tuple[str, str]:

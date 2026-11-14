@@ -14,8 +14,9 @@
 from __future__ import annotations
 
 import base64
-import logging
 from dataclasses import dataclass, replace
+
+from astrbot.api import logger
 
 try:
     from .kugou_client import (
@@ -25,8 +26,6 @@ except ImportError:  # 以顶层模块方式导入（离线测试）
     from kugou_client import (
         GATEWAY, KugouApiError, default_params,
     )
-
-logger = logging.getLogger(__name__)
 
 KRM_URL = GATEWAY + "/kmr/v2/audio"
 KRM_ROUTER = "openapi.kugou.com"

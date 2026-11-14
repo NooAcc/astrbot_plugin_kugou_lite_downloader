@@ -11,9 +11,10 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import logging
 import time
 from dataclasses import dataclass
+
+from astrbot.api import logger
 
 try:
     from .kugou_client import (
@@ -33,8 +34,6 @@ except ImportError:  # 以顶层模块方式导入（离线测试）
         Device,
         web_sign,
     )
-
-logger = logging.getLogger(__name__)
 
 QR_APPID = 1001                     # /v2/qrcode 固定 appid（上游 module 常量）
 SCAN_PAGE = "https://h5.kugou.com/apps/loginQRCode/html/index.html"

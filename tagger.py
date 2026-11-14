@@ -14,16 +14,15 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from dataclasses import dataclass
+
+from astrbot.api import logger
 
 try:
     from .metadata import TrackMeta, collect_track_meta
 except ImportError:  # 以顶层模块方式导入（离线测试）
     from metadata import TrackMeta, collect_track_meta
-
-logger = logging.getLogger(__name__)
 
 #: 多歌手分隔符，与酷狗展示习惯一致。
 ARTIST_SEPARATOR = "、"

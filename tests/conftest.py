@@ -105,8 +105,14 @@ def _install_astrbot_stub():
         def __init__(self, context=None):
             self.context = context
 
+    class StarTools:
+        @classmethod
+        def get_data_dir(cls, plugin_name=None):
+            raise RuntimeError("测试必须提供独立的插件数据目录")
+
     star.Context = Context
     star.Star = Star
+    star.StarTools = StarTools
 
     sys.modules.update({
         "astrbot": astrbot,
@@ -224,7 +230,7 @@ def plugin_factory(tmp_path, monkeypatch):
 
     def make(config=None):
         data_dir = tmp_path / "data"
-        monkeypatch.setattr(main, "plugin_data_dir", lambda: str(data_dir))
+        monkeypatch.setattr(main.StarTools, "get_data_dir", lambda plugin_name=None: data_dir)
         # 默认不联网取字体：测试离线运行，不该去镜像拉 16 MB；要测取回路径的
         # 用例自己传 font_auto_download=True。
         settings = {"font_auto_download": False}

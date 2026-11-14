@@ -48,12 +48,17 @@ def _install_astrbot_stub():
         def __init__(self, context=None):
             self.context = context
 
+    class _StarTools:
+        @classmethod
+        def get_data_dir(cls, plugin_name=None):
+            raise RuntimeError("测试必须提供独立的插件数据目录")
+
     make("astrbot")
     make("astrbot.api", logger=logging.getLogger("astrbot"))
     make("astrbot.api.event", AstrMessageEvent=object, filter=_Filter())
     make("astrbot.api.event.filter", PermissionType=_PermissionType)
     make("astrbot.api.message_components", Image=object, Plain=object)
-    make("astrbot.api.star", Context=_Context, Star=_Star)
+    make("astrbot.api.star", Context=_Context, Star=_Star, StarTools=_StarTools)
 
 
 def test_import_as_astrbot_package(tmp_path, monkeypatch):

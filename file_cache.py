@@ -1,6 +1,6 @@
 """文件与缓存安全：文件名净化、URL 安全校验、受限下载、缓存归属与清理。
 
-本模块不导入 astrbot，也不直接导入 aiohttp：HTTP 会话由调用方注入，
+本模块仅从 AstrBot 引入统一 logger，不直接导入 aiohttp：HTTP 会话由调用方注入，
 因此可以在没有网络的情况下完整测试。
 """
 
@@ -10,7 +10,6 @@ import asyncio
 import hashlib
 import ipaddress
 import json
-import logging
 import os
 import re
 import shutil
@@ -21,7 +20,7 @@ import uuid
 from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit
 
-logger = logging.getLogger(__name__)
+from astrbot.api import logger
 
 try:
     from .audio_probe import extension_of, probe, refine_bitrate, tier_of

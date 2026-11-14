@@ -4,18 +4,19 @@
 的「协议决策」一节（上游 KuGouMusicApi 的 util/helper.js、util/request.js、
 module/song_url.js、module/privilege_lite.js、module/search.js）。
 
-本模块不导入 astrbot，也不直接导入 aiohttp：HTTP 会话由调用方注入。
+本模块仅从 AstrBot 引入统一 logger，不直接导入 aiohttp：HTTP 会话由调用方注入。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import re
 import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
+
+from astrbot.api import logger
 
 try:
     from .file_cache import (
@@ -216,8 +217,6 @@ def _redact_url(url: str) -> str:
 
 
 # ── 客户端 ───────────────────────────────────────────────────────────────
-
-logger = logging.getLogger(__name__)
 
 
 class KugouApiError(Exception):

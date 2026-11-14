@@ -205,7 +205,7 @@ def test_fetch_lyric_logs_when_body_is_empty(caplog):
     import logging
 
     session = FakeSession([json_response(None)])
-    with caplog.at_level(logging.WARNING, logger="metadata"):
+    with caplog.at_level(logging.WARNING, logger="astrbot"):
         assert asyncio.run(metadata.fetch_lyric(_client(session), _SONG)) == ""
     assert any("空" in record.getMessage() for record in caplog.records)
 
@@ -215,7 +215,7 @@ def test_fetch_lyric_does_not_warn_for_plain_404(caplog):
     import logging
 
     session = FakeSession([json_response({"status": 404, "candidates": []})])
-    with caplog.at_level(logging.WARNING, logger="metadata"):
+    with caplog.at_level(logging.WARNING, logger="astrbot"):
         assert asyncio.run(metadata.fetch_lyric(_client(session), _SONG)) == ""
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
